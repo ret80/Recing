@@ -124,6 +124,10 @@ export class Physics {
   onGround: boolean;
   wasOnGround: boolean;
   previousY: number;
+  /** Тангаж рельефа под машиной (рад): > 0 — подъём вперёд. */
+  groundPitch = 0;
+  /** Крен рельефа (рад): > 0 — правый борт выше. */
+  groundRoll = 0;
 
   constructor(body: Body | null = null) {
     this.body = body;

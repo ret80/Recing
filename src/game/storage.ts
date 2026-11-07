@@ -1,4 +1,13 @@
-import { ECONOMY, SETTINGS_KEY, STORAGE_KEY, ZONES, type PilotId, type ZoneId } from '../config/balance';
+import {
+  ECONOMY,
+  SETTINGS_KEY,
+  STORAGE_KEY,
+  TRACK_LAYOUTS,
+  ZONES,
+  type PilotId,
+  type TrackLayout,
+  type ZoneId,
+} from '../config/balance';
 import type { UpgradeState } from '../config/cars';
 
 export type PlayerProfile = {
@@ -10,6 +19,8 @@ export type PlayerProfile = {
   pilot: PilotId;
   points: number;
   zone: ZoneId;
+  /** Выбранная конфигурация трассы (ровная или с перепадами высот). */
+  track: TrackLayout;
   division: 'rookie' | 'maniacs';
   seasonLaps: number;
   seasonFinished: boolean;
@@ -41,6 +52,7 @@ export function defaultProfile(): PlayerProfile {
     pilot: 'badlands',
     points: 0,
     zone: 1,
+    track: 'flat',
     division: 'rookie',
     seasonLaps: 0,
     seasonFinished: false,
@@ -60,11 +72,13 @@ function sanitizeProfile(raw: unknown): PlayerProfile {
   if (!raw || typeof raw !== 'object') return base;
   const value = raw as Partial<PlayerProfile>;
   const zone = ZONES.some((z) => z.id === value.zone) ? (value.zone as ZoneId) : base.zone;
+  const track = TRACK_LAYOUTS.some((t) => t.id === value.track) ? (value.track as TrackLayout) : base.track;
   return {
     ...base,
     ...value,
     version: 1,
     zone,
+    track,
     carsOwned: Array.isArray(value.carsOwned) && value.carsOwned.length > 0 ? value.carsOwned : base.carsOwned,
     upgrades: typeof value.upgrades === 'object' && value.upgrades ? { ...base.upgrades, ...value.upgrades } : base.upgrades,
     money: typeof value.money === 'number' ? value.money : base.money,

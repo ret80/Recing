@@ -13,10 +13,12 @@ import {
   type OGLRenderingContext,
 } from 'ogl';
 import { CAMERA, RENDER } from '../config/balance';
-import type { Waypoint } from '../track/track';
 import { MaterialCache, type LightUniforms, type LitOptions } from './materials';
 
 export type Vec3Like = { x: number; y: number; z: number };
+
+/** Минимум данных для построения ленты дороги: точка + поперечная ось. */
+export type RibbonPoint = { position: Vec3Like; right: Vec3Like };
 
 export class GameRenderer {
   readonly renderer: Renderer;
@@ -31,6 +33,8 @@ export class GameRenderer {
   private maxDpr: number = RENDER.highDpr;
   private disposed = false;
   private contextLost = false;
+  /** Текущее соотношение сторон кадра — по нему камера адаптируется к портрету. */
+  readonly view = { aspect: 1 };
   onContextRestored: (() => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -93,7 +97,8 @@ export class GameRenderer {
     const dpr = Math.min(window.devicePixelRatio || 1, this.maxDpr);
     this.renderer.dpr = dpr;
     this.renderer.setSize(width, height);
-    this.camera.perspective({ aspect: width / height, fov: CAMERA.fov });
+    this.view.aspect = width / height;
+    this.camera.perspective({ aspect: this.view.aspect, fov: CAMERA.fov });
   };
 
   render(): void {
@@ -205,7 +210,7 @@ export class GameRenderer {
     return root;
   }
 
-  createTrackRibbon(waypoints: Waypoint[], width: number, color: number): Mesh {
+  createTrackRibbon(waypoints: RibbonPoint[], width: number, color: number): Mesh {
     const positions: number[] = [];
     const normals: number[] = [];
     const uvs: number[] = [];
@@ -214,15 +219,38 @@ export class GameRenderer {
     const count = waypoints.length;
 
     for (let i = 0; i < count; i += 1) {
-      const wp = waypoints[i] as Waypoint;
+      const wp = waypoints[i] as RibbonPoint;
+      const prev = waypoints[(i - 1 + count) % count] as RibbonPoint;
+      const next = waypoints[(i + 1) % count] as RibbonPoint;
       if (i > 0) {
-        const prev = waypoints[i - 1] as Waypoint;
-        distance += wp.position.distanceTo(prev.position);
+        distance += Math.hypot(
+          wp.position.x - prev.position.x,
+          wp.position.y - prev.position.y,
+          wp.position.z - prev.position.z,
+        );
       }
-      const left = wp.position.clone().vadd(wp.right.scale(-width / 2));
-      const right = wp.position.clone().vadd(wp.right.scale(width / 2));
-      positions.push(left.x, 0.03, left.z, right.x, 0.03, right.z);
-      normals.push(0, 1, 0, 0, 1, 0);
+      const half = width / 2;
+      const lx = wp.position.x - wp.right.x * half;
+      const ly = wp.position.y - wp.right.y * half;
+      const lz = wp.position.z - wp.right.z * half;
+      const rx = wp.position.x + wp.right.x * half;
+      const ry = wp.position.y + wp.right.y * half;
+      const rz = wp.position.z + wp.right.z * half;
+      positions.push(lx, ly + 0.03, lz, rx, ry + 0.03, rz);
+
+      // Нормаль ленты с учётом уклона: up = tangent × right.
+      const tx = next.position.x - prev.position.x;
+      const ty = next.position.y - prev.position.y;
+      const tz = next.position.z - prev.position.z;
+      const ux = ty * wp.right.z - tz * wp.right.y;
+      const uy = tz * wp.right.x - tx * wp.right.z;
+      const uz = tx * wp.right.y - ty * wp.right.x;
+      const ul = Math.hypot(ux, uy, uz) || 1;
+      const nx = ux / ul;
+      const ny = uy / ul;
+      const nz = uz / ul;
+      normals.push(nx, ny, nz, nx, ny, nz);
+
       const v = distance / 14;
       uvs.push(0, v, 1, v);
     }

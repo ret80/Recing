@@ -7,6 +7,7 @@ import { Menu } from './Menu';
 import { Garage } from './Garage';
 import { Results, Countdown, Pause, TrackIntro } from './Screens';
 import { SettingsPanel } from './SettingsPanel';
+import { TouchControls } from './TouchControls';
 
 export function App({ game, store }: { game: Game; store: GameStore }) {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
@@ -27,6 +28,8 @@ export function App({ game, store }: { game: Game; store: GameStore }) {
       {screen === 'countdown' && <Countdown snapshot={snapshot} />}
       {screen === 'paused' && <Pause game={game} onSettings={openSettings} />}
       {screen === 'results' && <Results game={game} snapshot={snapshot} />}
+
+      {screen === 'racing' && snapshot.touchControls && <TouchControls game={game} />}
 
       {settingsOpen && <SettingsPanel game={game} settings={snapshot.settings} onClose={closeSettings} />}
     </div>

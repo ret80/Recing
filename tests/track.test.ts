@@ -47,6 +47,20 @@ describe('buildTrack', () => {
     }
   });
 
+  it('builds the hills layout with real elevation and solid walls', () => {
+    const flat = buildTrack(1, 'flat');
+    const hills = buildTrack(1, 'hills');
+    expect(flat.elevation).toBe(0);
+    expect(flat.solidGround).toBe(true);
+    expect(hills.elevation).toBeGreaterThan(15);
+    expect(hills.solidGround).toBe(false);
+    expect(hills.waypoints.every((wp) => wp.hasWalls)).toBe(true);
+    expect(hills.waypoints.some((wp) => wp.position.y > 10)).toBe(true);
+    expect(hills.waypoints.some((wp) => wp.position.y < -5)).toBe(true);
+    expect(hills.ramps.length).toBeGreaterThan(0);
+    expect(hills.boostPads.length).toBeGreaterThan(0);
+  });
+
   it('adds hazards, boost pads and ramps by zone', () => {
     expect(buildTrack(1).hazards).toHaveLength(0);
     expect(buildTrack(1).boostPads).toHaveLength(0);

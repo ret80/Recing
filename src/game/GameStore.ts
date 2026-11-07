@@ -1,5 +1,5 @@
 import type { GameScreen } from './gameMachine';
-import type { ZoneId } from '../config/balance';
+import type { TrackLayout, ZoneId } from '../config/balance';
 import type { PlayerProfile, GameSettings } from './storage';
 import { defaultProfile, defaultSettings } from './storage';
 
@@ -34,6 +34,9 @@ export type AppSnapshot = {
   screen: GameScreen;
   zoneId: ZoneId;
   zoneName: string;
+  track: TrackLayout;
+  /** Показывать ли экранные тач-контролы. */
+  touchControls: boolean;
   countdown: number;
   raceTime: number;
   timeLeft: number;
@@ -71,6 +74,8 @@ export function createInitialSnapshot(): AppSnapshot {
     screen: 'menu',
     zoneId: 1,
     zoneName: '',
+    track: 'flat',
+    touchControls: false,
     countdown: 0,
     raceTime: 0,
     timeLeft: 360,

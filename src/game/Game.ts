@@ -2,6 +2,7 @@ import { Body, Box, Quaternion, Vec3 } from 'cannon-es';
 import { createActor } from 'xstate';
 import {
   AI_CONFIG,
+  AMMO,
   COMMENTARY,
   LIMITS,
   PHYSICS,
@@ -10,10 +11,12 @@ import {
   RENDER,
   RESPAWN,
   SURFACES,
+  TRACK_LAYOUTS,
   WEAPON_TUNING,
   WORLD,
   type PilotSpec,
   type SurfaceType,
+  type TrackLayout,
   type ZoneId,
 } from '../config/balance';
 import { computeStats, getCar } from '../config/cars';
@@ -56,7 +59,7 @@ import {
 } from '../track/track';
 import { createAIMachine } from '../ai/aiMachine';
 import { GameStore, type HudCar, type RaceResultRow } from './GameStore';
-import { InputSystem } from './InputSystem';
+import { InputSystem, type TouchState } from './InputSystem';
 import { AudioSystem } from './AudioSystem';
 import { CameraRig } from './CameraRig';
 import { RaceScene } from './RaceScene';
@@ -69,6 +72,7 @@ import {
   dampLateral,
   decomposeVelocity,
   idealCornerSpeed,
+  integrateLongitudinal,
   rebuildVelocity,
   steeringYawRate,
   angleDifference,
@@ -83,6 +87,12 @@ const PLAYER_COLOR = 0xd9562a;
 const PICKUP_COLOR = 0xffd166;
 
 type AIProfile = { name: string; carId: string; aggression: number; skill: number; personality: string };
+
+export function isTouchCapable(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.matchMedia?.('(pointer: coarse)').matches) return true;
+  return 'ontouchstart' in window;
+}
 
 export class Game {
   readonly store: GameStore;
@@ -137,7 +147,7 @@ export class Game {
     this.scene = new RaceScene(this.renderer, this.physics);
     this.cameraRig = new CameraRig(this.renderer);
     this.cameraRig.cameraShakeEnabled = this.settings.cameraShake;
-    this.track = buildTrack(this.profile.zone);
+    this.track = buildTrack(this.profile.zone, this.profile.track);
     this.audio.setVolume(this.settings.volume);
     this.audio.onSubtitle = (text) => {
       this.store.set({ subtitle: text });
@@ -169,7 +179,12 @@ export class Game {
     window.addEventListener('pointerdown', this.unlockAudio, { once: true });
     window.addEventListener('keydown', this.unlockAudio, { once: true });
 
-    this.store.set({ profile: this.profile, money: this.profile.money, settings: this.settings });
+    this.store.set({
+      profile: this.profile,
+      money: this.profile.money,
+      settings: this.settings,
+      touchControls: isTouchCapable(),
+    });
     this.buildRace(this.profile.zone);
     this.syncHud();
   }
@@ -193,7 +208,15 @@ export class Game {
     this.lastPlayerPosition = RACE.maxCars;
     this.commentaryCooldown = 0;
     this.subtitleTimer = 0;
-    this.store.set({ zoneId: zone, zoneName: this.track.zone.name, results: null, seasonFailed: false, dnf: false, subtitle: '' });
+    this.store.set({
+      zoneId: zone,
+      zoneName: this.track.zone.name,
+      track: this.track.layout,
+      results: null,
+      seasonFailed: false,
+      dnf: false,
+      subtitle: '',
+    });
     if (this.screen === 'results') {
       this.actor.send({ type: 'NEXT_RACE' });
     } else {
@@ -216,7 +239,7 @@ export class Game {
     this.particles.clear();
     this.physics.dispose();
     this.physics = new PhysicsWorld();
-    this.track = buildTrack(zone);
+    this.track = buildTrack(zone, this.profile.track);
     this.scene = new RaceScene(this.renderer, this.physics);
     this.scene.build(this.track);
 
@@ -232,7 +255,7 @@ export class Game {
 
     this.spawnCars();
     this.spawnPickups();
-    this.store.set({ zoneId: zone, zoneName: this.track.zone.name });
+    this.store.set({ zoneId: zone, zoneName: this.track.zone.name, track: this.track.layout });
   }
 
   private playerPilot(): PilotSpec {
@@ -308,6 +331,7 @@ export class Game {
 
   private registerCarBody(id: EntityId, body: Body): void {
     this.bodyToEntity.set(body, id);
+    PhysicsWorld.syncInterpolation(body);
     body.addEventListener('collide', (event: { body: Body }) => this.onCarCollide(id, event.body));
   }
 
@@ -430,13 +454,19 @@ export class Game {
     for (const pivot of pivots) pivot.rotation.y = angle;
   }
 
+  /**
+   * Управление угловой скоростью до шага физики.
+   * Руление — велосипедная модель: ω = v · tan(δ) / база, ограниченная сцеплением.
+   * Поэтому на малой скорости машина не «разворачивается на месте».
+   */
   private vehiclePreStep(id: EntityId, dt: number): void {
     const carState = this.world.get(id, CarState);
     const physics = this.world.get(id, Physics);
     const stats = this.world.get(id, CarStats);
     const input = this.world.get(id, VehicleInput);
     const engine = this.world.get(id, EngineState);
-    if (!carState || !physics?.body || !stats || !input || !engine) return;
+    const surface = this.world.get(id, SurfaceState);
+    if (!carState || !physics?.body || !stats || !input || !engine || !surface) return;
     if (carState.phase !== 'alive') {
       input.throttle = 0;
       input.brake = 0;
@@ -447,38 +477,29 @@ export class Game {
     body.wakeUp();
     const forward = forwardVector(body.quaternion);
     forward.y = 0;
+    if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
     forward.normalize();
     const speed = body.velocity.dot(forward);
-    const nitro = engine.nitroTimer > 0 ? WEAPON_TUNING.nitroAccelMult : 1;
-    if (input.throttle > 0) {
-      const dv = forward.scale(stats.acceleration * nitro * input.throttle * dt);
-      body.velocity.vadd(dv, body.velocity);
-    }
-    if (input.brake > 0) {
-      if (speed > 0.5) {
-        // Торможение на переднем ходу.
-        const dv = forward.scale(-stats.acceleration * input.brake * 0.85 * dt);
-        body.velocity.vadd(dv, body.velocity);
-      } else {
-        // Задний ход: держим S и едем назад, пока не достигнут лимит.
-        const dv = forward.scale(-stats.acceleration * PHYSICS.reverseAccelFactor * input.brake * dt);
-        body.velocity.vadd(dv, body.velocity);
-      }
-    }
-
     const grounded = physics.onGround;
-    const steer = engine.spinOutTimer > 0 ? 0 : input.steer;
+
     if (engine.spinOutTimer > 0) {
       body.angularVelocity.y = engine.spinOutRate;
     } else {
-      const yawRate = steeringYawRate(steer, speed);
-      body.angularVelocity.y = yawRate * (grounded ? 1 : 0.45);
+      const target = steeringYawRate(input.steer, speed, stats.grip, surface.grip) * (grounded ? 1 : 0.4);
+      // Сглаживание: угловая скорость не перескакивает за один кадр.
+      const blend = 1 - Math.exp(-PHYSICS.steerSmoothing * dt);
+      body.angularVelocity.y += (target - body.angularVelocity.y) * blend;
     }
     const stabilize = Math.exp(-PHYSICS.rollStabilization * dt);
     body.angularVelocity.x *= stabilize;
     body.angularVelocity.z *= stabilize;
   }
 
+  /**
+   * Продольная динамика и сцепление после шага физики.
+   * Вся тяга/торможение/накат считаются в одном месте, поэтому скорость
+   * меняется плавно и без дёрганья.
+   */
   private vehiclePostStep(id: EntityId, dt: number): void {
     const carState = this.world.get(id, CarState);
     const physics = this.world.get(id, Physics);
@@ -494,8 +515,7 @@ export class Game {
     if (chassis.type === 'hover') {
       const ground = this.groundHeight(body);
       if (ground !== null) {
-        const ride = this.world.get(id, Chassis)?.rideHeight ?? 0.6;
-        body.position.y = ground + 0.75 + ride;
+        body.position.y = ground + 0.75 + chassis.rideHeight;
         body.velocity.y = 0;
       }
     }
@@ -506,34 +526,69 @@ export class Game {
     forward.normalize();
     const right = rightVector(body.quaternion);
     right.y = 0;
+    if (right.lengthSquared() < 1e-6) right.set(1, 0, 0);
     right.normalize();
     const { forwardSpeed, lateralSpeed } = decomposeVelocity(body.velocity, forward, right);
-    let newForward = applyDrag(forwardSpeed, surface.drag, dt);
-    if (input.brake > 0 && newForward > 0) {
-      const brakeDecel = 2.8 * input.brake * dt * stats.maxSpeed;
-      newForward = Math.max(0, newForward - brakeDecel);
-    }
-    const lateral = dampLateral(lateralSpeed, stats.grip, surface.grip, dt);
-    const nitroMult = engine.nitroTimer > 0 ? WEAPON_TUNING.nitroSpeedMult : 1;
-    newForward = clampForwardSpeed(newForward, stats.maxSpeed, nitroMult);
-    const vertical = Math.max(-PHYSICS.maxVerticalSpeed, Math.min(PHYSICS.maxVerticalSpeed, body.velocity.y));
-    const velocity = rebuildVelocity(newForward, lateral, forward, right, vertical);
-    body.velocity.copy(velocity);
+    const nitroActive = engine.nitroTimer > 0;
 
-    // Мягкая стабилизация крена/тангажа: машина не переворачивается на ровной трассе.
-    // Руление управляется исключительно angularVelocity.y — slerp удалён,
-    // так как он боролся с angularVelocity и вызывал рывки при поворотах.
-    const stabilize = Math.exp(-PHYSICS.rollStabilization * dt);
-    body.angularVelocity.x *= stabilize;
-    body.angularVelocity.z *= stabilize;
+    let newForward = integrateLongitudinal({
+      speed: forwardSpeed,
+      throttle: input.throttle,
+      brake: input.brake,
+      acceleration: stats.acceleration,
+      maxSpeed: stats.maxSpeed,
+      dt,
+      slopePitch: physics.groundPitch,
+      nitroMult: nitroActive ? WEAPON_TUNING.nitroAccelMult : 1,
+    });
+    newForward = applyDrag(newForward, surface.drag, dt);
+    const speedMult = nitroActive ? WEAPON_TUNING.nitroSpeedMult : 1;
+    newForward = clampForwardSpeed(newForward, stats.maxSpeed, speedMult);
+    const lateral = dampLateral(lateralSpeed, stats.grip, surface.grip, dt);
+    const vertical = Math.max(-PHYSICS.maxVerticalSpeed, Math.min(PHYSICS.maxVerticalSpeed, body.velocity.y));
+    body.velocity.copy(rebuildVelocity(newForward, lateral, forward, right, vertical));
+
+    this.alignToGround(id, dt);
+  }
+
+  /**
+   * Плавно ставит кузов по нормали рельефа: на горках машина едет
+   * по поверхности, а не висит горизонтально.
+   */
+  private alignToGround(id: EntityId, dt: number): void {
+    const physics = this.world.get(id, Physics);
+    const chassis = this.world.get(id, Chassis);
+    const body = physics?.body;
+    if (!body || chassis?.type === 'hover') return;
+    if (!physics.onGround) return;
+
+    const pitch = physics.groundPitch;
+    const roll = physics.groundRoll;
+
+    const yaw = quaternionYaw(body.quaternion);
+    const yawQ = new Quaternion().setFromEuler(0, yaw, 0);
+    const cp = Math.cos(pitch);
+    const cr = Math.cos(roll);
+    const local = new Vec3(-Math.sin(roll), cp * cr, -Math.sin(pitch) * cr);
+    local.normalize();
+    const normal = yawQ.vmult(local);
+    if (normal.y < 0.4) return;
+
+    const tilt = new Quaternion().setFromVectors(new Vec3(0, 1, 0), normal);
+    const target = tilt.mult(yawQ);
+    const alpha = 1 - Math.exp(-PHYSICS.groundAlignRate * dt);
+    body.quaternion.slerp(target, alpha, body.quaternion);
+    body.quaternion.normalize();
   }
 
   private syncCarTransform(id: EntityId): void {
     const transform = this.world.get(id, Transform);
     const physics = this.world.get(id, Physics);
     if (!transform || !physics?.body) return;
-    transform.position.copy(physics.body.position);
-    transform.rotation.copy(physics.body.quaternion);
+    // Интерполированное положение: физика идёт фиксированным шагом,
+    // без этого картинка дёргается на мониторах с частотой не 60 Гц.
+    transform.position.copy(physics.body.interpolatedPosition);
+    transform.rotation.copy(physics.body.interpolatedQuaternion);
   }
 
   private groundHeight(body: Body): number | null {
@@ -550,16 +605,59 @@ export class Game {
   private updateGround(id: EntityId): void {
     const physics = this.world.get(id, Physics);
     if (!physics?.body) return;
-    physics.previousY = physics.body.position.y;
+    const body = physics.body;
+    physics.previousY = body.position.y;
     physics.wasOnGround = physics.onGround;
     const hit = this.physics.raycast(
-      new Vec3(physics.body.position.x, physics.body.position.y, physics.body.position.z),
-      new Vec3(physics.body.position.x, physics.body.position.y - 1.35, physics.body.position.z),
-      physics.body,
+      new Vec3(body.position.x, body.position.y, body.position.z),
+      new Vec3(body.position.x, body.position.y - 1.35, body.position.z),
+      body,
     );
     const valid = hit !== null && hit.body !== null && !this.bodyToEntity.has(hit.body);
-    physics.onGround = valid && physics.body.velocity.y <= 2.5;
+    physics.onGround = valid && body.velocity.y <= 2.5;
     if (this.world.get(id, Chassis)?.type === 'hover') physics.onGround = valid;
+
+    // Уклон рельефа по четырём пробам вокруг центра машины.
+    if (valid) {
+      const forward = forwardVector(body.quaternion);
+      forward.y = 0;
+      if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
+      forward.normalize();
+      const right = new Vec3(forward.z, 0, -forward.x);
+      const probe = (along: number, side: number): number | null => {
+        const x = body.position.x + forward.x * along + right.x * side;
+        const z = body.position.z + forward.z * along + right.z * side;
+        const sample = this.physics.raycast(
+          new Vec3(x, body.position.y + 1.4, z),
+          new Vec3(x, body.position.y - 2.6, z),
+          body,
+        );
+        if (!sample || !sample.body || this.bodyToEntity.has(sample.body)) return null;
+        return sample.point.y;
+      };
+      const halfWheelbase = 1.4;
+      const halfTrack = 1.0;
+      const front = probe(halfWheelbase, 0);
+      const rear = probe(-halfWheelbase, 0);
+      const rightSide = probe(0, halfTrack);
+      const leftSide = probe(0, -halfTrack);
+      const blend = 1 - Math.exp(-12 * WORLD.fixedDt);
+      if (front !== null && rear !== null) {
+        const target = Math.atan2(front - rear, halfWheelbase * 2);
+        physics.groundPitch += (target - physics.groundPitch) * blend;
+      } else {
+        physics.groundPitch += (0 - physics.groundPitch) * blend;
+      }
+      if (rightSide !== null && leftSide !== null) {
+        const target = Math.atan2(rightSide - leftSide, halfTrack * 2);
+        physics.groundRoll += (target - physics.groundRoll) * blend;
+      } else {
+        physics.groundRoll += (0 - physics.groundRoll) * blend;
+      }
+    } else {
+      physics.groundPitch *= 0.9;
+      physics.groundRoll *= 0.9;
+    }
   }
 
   private updateSurface(id: EntityId, dt: number): void {
@@ -673,7 +771,8 @@ export class Game {
     if (dx * dx + dz * dz > radius * radius) return;
     const event = advanceLap(lap, next, this.raceTime);
     if (event === 'none') return;
-    this.refillWeapons(id);
+    // Боезапас НЕ восполняется на чекпоинтах: патроны, мины, масло и буст
+    // кончаются, и стрельба не превращается в бесконечную очередь.
     if (event === 'lap' || event === 'finish') {
       this.resetPickups();
       if (id === this.playerId) {
@@ -733,6 +832,7 @@ export class Game {
         pickup.active = false;
         if (render) render.visible = false;
         this.scrapCollected += 1;
+        this.resupplyWeapons(id);
         this.audio.pickup();
         this.particles.burst(transform.position.clone(), 'spark', 16, 2.5, 0.6, 0.22);
       }
@@ -1166,6 +1266,7 @@ export class Game {
       debrisBody.velocity.set(offset.x * 5, 3 + Math.random() * 5, offset.z * 5);
       debrisBody.angularVelocity.set((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
       this.physics.world.addBody(debrisBody);
+      PhysicsWorld.syncInterpolation(debrisBody);
       this.world.add(id, new Physics(debrisBody));
 
       const visual = this.renderer.box(size, size * 0.7, size * 1.2, 0x6b4a32);
@@ -1211,13 +1312,16 @@ export class Game {
     const body = physics.body;
     if (!this.physics.world.bodies.includes(body)) this.physics.world.addBody(body);
     this.bodyToEntity.set(body, id);
-    body.position.set(wp.position.x, CHASSIS_REST_Y + 0.2, wp.position.z);
+    body.position.set(wp.position.x, wp.position.y + CHASSIS_REST_Y + 0.2, wp.position.z);
     body.quaternion.setFromEuler(0, yaw, 0);
     body.velocity.set(0, 0, 0);
     body.angularVelocity.set(0, 0, 0);
     body.force.set(0, 0, 0);
     body.torque.set(0, 0, 0);
     body.wakeUp();
+    PhysicsWorld.syncInterpolation(body);
+    physics.groundPitch = 0;
+    physics.groundRoll = 0;
     health.current = health.max;
     health.damageLevel = 0;
     health.invulnTimer = RESPAWN.invulnSec;
@@ -1227,7 +1331,7 @@ export class Game {
       engine.rampInside = false;
       engine.padCooldown = 0;
     }
-    this.refillWeapons(id);
+    this.refillWeapons(id, AMMO.respawnFrontShare, AMMO.respawnRearShare, AMMO.respawnBoostShare);
     if (render) render.visible = true;
     state.phase = 'alive';
     state.respawnTimer = 0;
@@ -1235,15 +1339,26 @@ export class Game {
     this.particles.burst(body.position.clone(), 'dust', 26, 2.4, 0.6, 0.35);
   }
 
-  private refillWeapons(id: EntityId): void {
+  /** Полный боезапас — только после смерти/респауна. */
+  private refillWeapons(id: EntityId, frontShare = 1, rearShare = 1, boostShare = 1): void {
     const weapon = this.world.get(id, Weapon);
     if (!weapon) return;
-    weapon.frontAmmo = weapon.maxFrontAmmo;
-    weapon.rearAmmo = weapon.maxRearAmmo;
-    weapon.boostAmmo = weapon.maxBoostAmmo;
+    weapon.frontAmmo = Math.max(weapon.frontAmmo, Math.ceil(weapon.maxFrontAmmo * frontShare));
+    weapon.rearAmmo = Math.max(weapon.rearAmmo, Math.ceil(weapon.maxRearAmmo * rearShare));
+    weapon.boostAmmo = Math.max(weapon.boostAmmo, Math.ceil(weapon.maxBoostAmmo * boostShare));
     weapon.frontCooldown = 0;
     weapon.rearCooldown = 0;
     weapon.boostCooldown = 0;
+  }
+
+  /** Ящик утиля даёт немного патронов, мин и зарядов буста — поштучно. */
+  private resupplyWeapons(id: EntityId): void {
+    const weapon = this.world.get(id, Weapon);
+    if (!weapon) return;
+    const front = Math.max(AMMO.pickupFrontMin, Math.ceil(weapon.maxFrontAmmo * AMMO.pickupFrontShare));
+    weapon.frontAmmo = Math.min(weapon.maxFrontAmmo, weapon.frontAmmo + front);
+    weapon.rearAmmo = Math.min(weapon.maxRearAmmo, weapon.rearAmmo + AMMO.pickupRear);
+    weapon.boostAmmo = Math.min(weapon.maxBoostAmmo, weapon.boostAmmo + AMMO.pickupBoost);
   }
 
   // ----------------------------------------------------------------------- AI
@@ -1617,8 +1732,11 @@ export class Game {
       if (render.kind === 'pickup') object.rotation.y += dt * 2.2;
     }
 
+    // Камеру ведём по интерполированному трансформу: иначе она дрожит
+    // при фиксированном шаге физики (та же причина, что и у меша машины).
     const playerPhysics = this.playerId >= 0 ? this.world.get(this.playerId, Physics) : undefined;
-    const playerPos = playerPhysics?.body?.position;
+    const playerTransform = this.playerId >= 0 ? this.world.get(this.playerId, Transform) : undefined;
+    const playerPos = playerPhysics?.body ? playerTransform?.position ?? playerPhysics.body.position : undefined;
 
     if (this.screen === 'trackIntro') {
       this.cameraRig.intro(dt, this.track);
@@ -1630,7 +1748,9 @@ export class Game {
     } else if (this.screen === 'paused') {
       // камера замирает
     } else if (playerPos) {
-      const forward = forwardVector(playerPhysics?.body?.quaternion ?? new Quaternion());
+      const forward = forwardVector(
+        playerTransform?.rotation ?? playerPhysics?.body?.quaternion ?? new Quaternion(),
+      );
       forward.y = 0;
       if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
       forward.normalize();
@@ -1682,6 +1802,10 @@ export class Game {
     this.store.set({ profile: this.profile, money: this.profile.money });
     this.buildRace(this.profile.zone);
     this.actor.send({ type: 'START' });
+  }
+
+  setTouchInput(patch: Partial<TouchState>): void {
+    this.input.setTouch(patch);
   }
 
   setBinding(action: import('./InputSystem').InputAction, codes: string[]): void {
@@ -1737,6 +1861,18 @@ export class Game {
     saveProfile(this.profile);
     this.store.setProfile(this.profile);
     this.buildRace(zone);
+  }
+
+  selectTrack(layout: TrackLayout): void {
+    if (this.profile.track === layout) return;
+    this.profile = { ...this.profile, track: layout };
+    saveProfile(this.profile);
+    this.store.setProfile(this.profile);
+    this.buildRace(this.track.zone.id);
+  }
+
+  getTrackName(layout: TrackLayout): string {
+    return TRACK_LAYOUTS.find((entry) => entry.id === layout)?.name ?? 'Трасса';
   }
 
   setSettings(settings: GameSettings): void {

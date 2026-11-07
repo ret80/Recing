@@ -37,6 +37,9 @@ export const CAMERA = {
   lag: 0.12,
   shakeDecay: 0.5,
   shakeAmplitude: 0.9,
+  /** Портретный режим: камера отъезжает, чтобы машина влезала в узкий кадр. */
+  portraitDistanceMult: 1.7,
+  portraitHeightMult: 1.35,
 } as const;
 
 export const PHYSICS = {
@@ -45,14 +48,21 @@ export const PHYSICS = {
   rideHeight: 0.62,
   wheelRadius: 0.42,
   wheelWidth: 0.32,
-  /** Скорость поворота кузова (рад/с) при полном руле. */
-  steerRate: 2.1,
+  /**
+   * Максимальный угол поворота передних колёс на малой скорости (рад).
+   * Руль работает как велосипедная модель: машина не может вращаться на месте.
+   */
+  steerMaxAngle: 0.58,
+  /** Скорость (м/с), на которой угол руля падает вдвое от максимума. */
+  steerFalloffSpeed: 13,
+  /** База машины (м) — расстояние между осями для кинематики поворота. */
+  wheelbase: 2.6,
   /** Ниже этой скорости машина не поворачивает (мёртвая зона руления). */
-  steerDeadSpeed: 0.8,
-  /** Минимальная скорость, с которой работает руление на полную. */
-  steerMinSpeed: 1.5,
+  steerDeadSpeed: 0.6,
   /** Визуальный угол поворота передних колёс (рад) при полном руле. */
   steerVisualAngle: 0.52,
+  /** Предельное боковое ускорение сцепления (м/с²) — ограничивает поворот на скорости. */
+  lateralGripAccel: 9.82,
   /** Доля ускорения, доступная на заднем ходу. */
   reverseAccelFactor: 0.8,
   /** Максимальная скорость заднего хода как доля от maxSpeed. */
@@ -61,11 +71,23 @@ export const PHYSICS = {
   lateralGripRate: 7,
   /** Гашение продольной скорости (drag) как exp(-drag*rate*dt). */
   dragRate: 1.4,
+  /** Сопротивление качению (м/с²) при отпущенном газе. */
+  coastDecel: 2.6,
+  /** Торможение двигателем (м/с²) — накат гаснет заметно, но не мгновенно. */
+  engineBrake: 3.4,
+  /** Аэродинамическое сопротивление: decel = aeroDrag * v². */
+  aeroDrag: 0.0014,
+  /** Тормозной коэффициент относительно ускорения машины. */
+  brakeFactor: 1.2,
   /** Ограничение вертикальной скорости для стабильности. */
   maxVerticalSpeed: 40,
   /** Угловая стабилизация крена/тангажа (1/с). */
   rollStabilization: 6,
-  restitutionBody: 0.25,
+  /** Скорость выравнивания кузова по рельефу (доля в секунду). */
+  groundAlignRate: 9,
+  /** Сглаживание руления (доля в секунду): убирает рывки угловой скорости. */
+  steerSmoothing: 18,
+  restitutionBody: 0.05,
   groundFriction: 0.35,
   /**
    * Трение кузова о дорогу. Аркадная модель управляет сцеплением вручную
@@ -82,6 +104,21 @@ export const PHYSICS = {
   carImpactMaxDamage: 15,
   /** Пауза между эпизодами урона от контакта одной пары машин. */
   carImpactCooldownSec: 0.4,
+} as const;
+
+export const AMMO = {
+  /** Доля переднего боезапаса за один ящик утиля. */
+  pickupFrontShare: 0.2,
+  /** Минимум патронов переднего оружия за ящик. */
+  pickupFrontMin: 3,
+  /** Патронов/мин/масла заднего оружия за ящик. */
+  pickupRear: 1,
+  /** Зарядов буста за ящик. */
+  pickupBoost: 1,
+  /** Доля боезапаса, возвращаемая при респауне после смерти. */
+  respawnFrontShare: 0.5,
+  respawnRearShare: 0.5,
+  respawnBoostShare: 0.5,
 } as const;
 
 export const RACE = {
@@ -397,6 +434,31 @@ export const ZONES: ZoneSpec[] = [
     description: 'Радиоактивная лава, узкие мосты и длинные трамплины.',
     palette: { road: 0x30292a, ground: 0x4a3330, sky: 0x8a2f26, accent: 0xff5a1f },
     boss: 'Плавильщик Слэш',
+  },
+];
+
+export type TrackLayout = 'flat' | 'hills';
+
+export type TrackLayoutSpec = {
+  id: TrackLayout;
+  name: string;
+  description: string;
+  /** Мин/макс перепад высот (м) — 0 для ровной трассы. */
+  elevation: number;
+};
+
+export const TRACK_LAYOUTS: TrackLayoutSpec[] = [
+  {
+    id: 'flat',
+    name: 'Соляной Полигон',
+    description: 'Ровное кольцо через ржавые заводы: широкие дуги, длинные прямые и хороший разгон.',
+    elevation: 0,
+  },
+  {
+    id: 'hills',
+    name: 'Серпантин',
+    description: 'Горки и спуски: подъёмы отбирают скорость, а с гребня машина уходит в полёт.',
+    elevation: 32,
   },
 ];
 

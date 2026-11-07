@@ -1,5 +1,12 @@
 import { Vec3 } from 'cannon-es';
-import { SURFACES, ZONES, type SurfaceType, type ZoneId, type ZoneSpec } from '../config/balance';
+import {
+  SURFACES,
+  ZONES,
+  type SurfaceType,
+  type TrackLayout,
+  type ZoneId,
+  type ZoneSpec,
+} from '../config/balance';
 
 export type Waypoint = {
   index: number;
@@ -39,9 +46,14 @@ export type PickupSpot = {
 
 export type TrackDefinition = {
   zone: ZoneSpec;
+  layout: TrackLayout;
   waypoints: Waypoint[];
   width: number;
   length: number;
+  /** Перепад высот трассы (м). */
+  elevation: number;
+  /** Есть ли сплошная земля под трассой (иначе — обрыв в бездну). */
+  solidGround: boolean;
   checkpoints: number[];
   hazards: HazardZone[];
   boostPads: BoostPad[];
@@ -49,7 +61,8 @@ export type TrackDefinition = {
   pickups: PickupSpot[];
 };
 
-type ControlPoint = { x: number; z: number };
+/** y — высота полотна в этой точке сплайна (0 — ровная трасса). */
+type ControlPoint = { x: number; z: number; y?: number };
 
 const CONTROL_POINTS: Record<ZoneId, ControlPoint[]> = {
   1: [
@@ -148,12 +161,37 @@ const CONTROL_POINTS: Record<ZoneId, ControlPoint[]> = {
   ],
 };
 
+/**
+ * Второй ландшафт: горный серпантин с подъёмами и спусками.
+ * Кольцо возвращается на старт с тем же перепадом высот, что и ушло.
+ */
+const SERPENTINE_POINTS: ControlPoint[] = [
+  { x: 0, z: 0, y: 0 },
+  { x: 120, z: -10, y: 3 },
+  { x: 220, z: 20, y: 12 },
+  { x: 280, z: 90, y: 22 },
+  { x: 250, z: 160, y: 19 },
+  { x: 170, z: 190, y: 6 },
+  { x: 120, z: 260, y: -4 },
+  { x: 180, z: 330, y: 9 },
+  { x: 100, z: 380, y: 22 },
+  { x: 10, z: 340, y: 16 },
+  { x: -40, z: 270, y: 0 },
+  { x: -120, z: 250, y: -10 },
+  { x: -180, z: 180, y: -3 },
+  { x: -140, z: 110, y: 8 },
+  { x: -200, z: 50, y: 3 },
+  { x: -110, z: 10, y: 0 },
+];
+
 function catmullRom(p0: ControlPoint, p1: ControlPoint, p2: ControlPoint, p3: ControlPoint, t: number): ControlPoint {
   const t2 = t * t;
   const t3 = t2 * t;
+  const y = (p: ControlPoint) => p.y ?? 0;
   return {
     x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
     z: 0.5 * (2 * p1.z + (-p0.z + p2.z) * t + (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 + (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3),
+    y: 0.5 * (2 * y(p1) + (-y(p0) + y(p2)) * t + (2 * y(p0) - 5 * y(p1) + 4 * y(p2) - y(p3)) * t2 + (-y(p0) + 3 * y(p1) - 3 * y(p2) + y(p3)) * t3),
   };
 }
 
@@ -180,17 +218,19 @@ function computeWaypoints(points: ControlPoint[], width: number, hasWalls: boole
   const count = points.length;
   const waypoints: Waypoint[] = [];
   let total = 0;
-  const positions = points.map((p) => new Vec3(p.x, 0, p.z));
+  const positions = points.map((p) => new Vec3(p.x, p.y ?? 0, p.z));
 
   for (let i = 0; i < count; i += 1) {
     const prev = positions[(i - 1 + count) % count] as Vec3;
     const current = positions[i] as Vec3;
     const next = positions[(i + 1) % count] as Vec3;
     const tangent = next.vsub(prev);
-    tangent.y = 0;
     if (tangent.lengthSquared() < 1e-6) tangent.set(0, 0, 1);
     tangent.normalize();
+    // right — строго горизонтальная ось: по ней строятся отбойники, стены и решётка.
     const right = new Vec3(tangent.z, 0, -tangent.x);
+    if (right.lengthSquared() < 1e-6) right.set(1, 0, 0);
+    right.normalize();
     const segmentLength = current.distanceTo(next);
     total += segmentLength;
     waypoints.push({
@@ -213,8 +253,16 @@ function computeWaypoints(points: ControlPoint[], width: number, hasWalls: boole
       const current = waypoints[i] as Waypoint;
       const next = waypoints[(i + 1) % waypoints.length] as Waypoint;
       const ds = Math.max(0.5, current.position.distanceTo(next.position));
-      const crossY = prev.tangent.z * next.tangent.x - prev.tangent.x * next.tangent.z;
-      const dot = Math.max(-1, Math.min(1, prev.tangent.dot(next.tangent)));
+      // Кривизна считается по горизонтальной проекции: уклон не должен
+      // заставлять ИИ тормозить перед каждым подъёмом.
+      const prevH = Math.hypot(prev.tangent.x, prev.tangent.z) || 1;
+      const nextH = Math.hypot(next.tangent.x, next.tangent.z) || 1;
+      const px = prev.tangent.x / prevH;
+      const pz = prev.tangent.z / prevH;
+      const nx = next.tangent.x / nextH;
+      const nz = next.tangent.z / nextH;
+      const crossY = pz * nx - px * nz;
+      const dot = Math.max(-1, Math.min(1, px * nx + pz * nz));
       const angle = Math.acos(dot);
       const signed = (crossY >= 0 ? 1 : -1) * angle;
       current.signedCurvature = signed / ds;
@@ -279,17 +327,25 @@ function buildHazards(zone: ZoneSpec, waypoints: Waypoint[]): HazardZone[] {
   return hazards;
 }
 
-function buildBoostPads(zone: ZoneSpec, waypoints: Waypoint[]): BoostPad[] {
-  if (zone.id === 1) return [];
+function buildBoostPads(zone: ZoneSpec, waypoints: Waypoint[], layout: TrackLayout): BoostPad[] {
+  if (zone.id === 1 && layout === 'flat') return [];
   const count = waypoints.length;
-  const fractions = zone.id === 2 ? [0.08, 0.34, 0.62, 0.9] : [0.15, 0.5, 0.83];
+  const fractions =
+    layout === 'hills' ? [0.12, 0.42, 0.68, 0.92] : zone.id === 2 ? [0.08, 0.34, 0.62, 0.9] : [0.15, 0.5, 0.83];
   return fractions.map((f) => {
     const wp = waypoints[Math.floor(count * f) % count] as Waypoint;
     return { center: wp.position.clone(), tangent: wp.tangent.clone(), radius: 3.4 };
   });
 }
 
-function buildRamps(zone: ZoneSpec, waypoints: Waypoint[]): RampZone[] {
+function buildRamps(zone: ZoneSpec, waypoints: Waypoint[], layout: TrackLayout): RampZone[] {
+  if (layout === 'hills') {
+    const count = waypoints.length;
+    return [0.22, 0.5, 0.76].map((f) => {
+      const wp = waypoints[Math.floor(count * f) % count] as Waypoint;
+      return { center: wp.position.clone(), tangent: wp.tangent.clone(), halfLength: 6, halfWidth: Math.min(6, zone.width / 2 - 1) };
+    });
+  }
   if (!zone.hasCliffs) return [];
   const count = waypoints.length;
   const fractions = zone.id === 6 ? [0.2, 0.45, 0.66, 0.88] : [0.27, 0.6];
@@ -311,27 +367,34 @@ function buildPickups(waypoints: Waypoint[], width: number): PickupSpot[] {
     const wp = waypoints[Math.floor((count * (i + 0.5)) / 8) % count] as Waypoint;
     const side = i % 2 === 0 ? 1 : -1;
     const position = wp.position.clone().vadd(wp.right.scale(side * (width / 2 - 2)));
-    position.y = 0.6;
+    position.y = wp.position.y + 0.6;
     spots.push({ position, active: true });
   }
   return spots;
 }
 
-export function buildTrack(zoneId: ZoneId): TrackDefinition {
+export function buildTrack(zoneId: ZoneId, layout: TrackLayout = 'flat'): TrackDefinition {
   const zone = ZONES.find((z) => z.id === zoneId);
   if (!zone) throw new Error(`Unknown zone ${zoneId}`);
-  const controls = CONTROL_POINTS[zoneId];
+  const controls = layout === 'hills' ? SERPENTINE_POINTS : CONTROL_POINTS[zoneId];
   const samples = sampleCenterline(controls);
   const waypoints = computeWaypoints(samples, zone.width, true);
   let length = 0;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < waypoints.length; i += 1) {
     const a = waypoints[i] as Waypoint;
     const b = waypoints[(i + 1) % waypoints.length] as Waypoint;
     length += a.position.distanceTo(b.position);
+    minY = Math.min(minY, a.position.y);
+    maxY = Math.max(maxY, a.position.y);
   }
 
+  // Серпантин целиком огорожен — с горки нельзя улететь в пропасть.
   // В зонах с обрывами стены только на отдельных участках (GDD §6).
-  if (zone.hasCliffs) {
+  if (layout === 'hills') {
+    for (const wp of waypoints) wp.hasWalls = true;
+  } else if (zone.hasCliffs) {
     for (const wp of waypoints) {
       wp.hasWalls = wp.index % 11 < 2;
     }
@@ -343,15 +406,18 @@ export function buildTrack(zoneId: ZoneId): TrackDefinition {
   for (let i = 0; i < 12; i += 1) checkpoints.push((i * checkpointStep) % waypoints.length);
 
   const hazards = buildHazards(zone, waypoints);
-  const boostPads = buildBoostPads(zone, waypoints);
-  const ramps = buildRamps(zone, waypoints);
+  const boostPads = buildBoostPads(zone, waypoints, layout);
+  const ramps = buildRamps(zone, waypoints, layout);
   const pickups = buildPickups(waypoints, zone.width);
 
   return {
     zone,
+    layout,
     waypoints,
     width: zone.width,
     length,
+    elevation: Number.isFinite(minY) && Number.isFinite(maxY) ? maxY - minY : 0,
+    solidGround: layout === 'flat' && !zone.hasCliffs,
     checkpoints,
     hazards,
     boostPads,
@@ -399,7 +465,7 @@ export function startingGrid(track: TrackDefinition): { position: Vec3; yaw: num
       .clone()
       .vadd(start.tangent.scale(-(6 + row * rowSpacing)))
       .vadd(start.right.scale(side * sideSpacing));
-    grid.push({ position: new Vec3(position.x, 0.8, position.z), yaw });
+    grid.push({ position: new Vec3(position.x, position.y + 0.8, position.z), yaw });
   }
   return grid;
 }

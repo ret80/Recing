@@ -13,9 +13,33 @@ export const DEFAULT_BINDINGS: Record<InputAction, string[]> = {
   pause: ['Escape', 'KeyP'],
 };
 
+export type TouchState = {
+  active: boolean;
+  /** −1 — вправо, +1 — влево (как у клавиатуры). */
+  steer: number;
+  throttle: number;
+  brake: number;
+  fireFront: boolean;
+  fireRear: boolean;
+  fireBoost: boolean;
+};
+
+const EMPTY_TOUCH: TouchState = {
+  active: false,
+  steer: 0,
+  throttle: 0,
+  brake: 0,
+  fireFront: false,
+  fireRear: false,
+  fireBoost: false,
+};
+
 export class InputSystem {
   private keys = new Set<string>();
   private previous = new Set<string>();
+  private previousActions = { fireFront: false, fireRear: false, fireBoost: false };
+  private resetPending = false;
+  private touch: TouchState = { ...EMPTY_TOUCH };
   private bindings: Record<InputAction, string[]> = structuredClone(DEFAULT_BINDINGS);
   private gamepadEnabled = true;
   onPause: (() => void) | null = null;
@@ -47,7 +71,17 @@ export class InputSystem {
 
   private handleBlur = (): void => {
     this.keys.clear();
+    this.touch = { ...EMPTY_TOUCH };
   };
+
+  /** Экранные контролы пишут сюда; null/частичный патч — обновление полей. */
+  setTouch(patch: Partial<TouchState>): void {
+    this.touch = { ...this.touch, ...patch };
+  }
+
+  clearTouch(): void {
+    this.touch = { ...EMPTY_TOUCH };
+  }
 
   setBinding(action: InputAction, codes: string[]): void {
     this.bindings[action] = codes;
@@ -65,10 +99,6 @@ export class InputSystem {
     return this.bindings[action].some((code) => this.keys.has(code));
   }
 
-  private wasDown(action: InputAction): boolean {
-    return this.bindings[action].some((code) => this.previous.has(code));
-  }
-
   update(input: VehicleInput): void {
     let throttle = this.isDown('throttle') ? 1 : 0;
     let brake = this.isDown('brake') ? 1 : 0;
@@ -76,6 +106,15 @@ export class InputSystem {
     let fireFront = this.isDown('fireFront');
     let fireRear = this.isDown('fireRear');
     let fireBoost = this.isDown('fireBoost');
+
+    if (this.touch.active) {
+      if (this.touch.steer !== 0) steer = this.touch.steer;
+      throttle = Math.max(throttle, this.touch.throttle);
+      brake = Math.max(brake, this.touch.brake);
+      fireFront = fireFront || this.touch.fireFront;
+      fireRear = fireRear || this.touch.fireRear;
+      fireBoost = fireBoost || this.touch.fireBoost;
+    }
 
     if (this.gamepadEnabled && typeof navigator.getGamepads === 'function') {
       const pads = navigator.getGamepads();
@@ -98,22 +137,29 @@ export class InputSystem {
       }
     }
 
+    if (this.resetPending) {
+      this.previousActions = { fireFront, fireRear, fireBoost };
+      this.resetPending = false;
+    }
+
     input.throttle = throttle;
     input.brake = brake;
     input.steer = steer;
     input.fireFront = fireFront;
     input.fireRear = fireRear;
     input.fireBoost = fireBoost;
-    input.fireFrontPressed = fireFront && !this.wasDown('fireFront');
-    input.fireRearPressed = fireRear && !this.wasDown('fireRear');
-    input.fireBoostPressed = fireBoost && !this.wasDown('fireBoost');
+    input.fireFrontPressed = fireFront && !this.previousActions.fireFront;
+    input.fireRearPressed = fireRear && !this.previousActions.fireRear;
+    input.fireBoostPressed = fireBoost && !this.previousActions.fireBoost;
 
+    this.previousActions = { fireFront, fireRear, fireBoost };
     this.previous = new Set(this.keys);
   }
 
   /** Сброс edge-состояний после паузы/перехода. */
   resetEdges(): void {
     this.previous = new Set(this.keys);
+    this.resetPending = true;
   }
 
   dispose(): void {

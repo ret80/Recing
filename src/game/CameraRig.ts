@@ -55,10 +55,22 @@ export class CameraRig {
     this.camera.lookAt(this.look);
   }
 
+  /** Портретный кадр уже — камера отъезжает, чтобы машина помещалась в кадр. */
+  private framing(): { distance: number; height: number } {
+    const aspect = this.renderer.view.aspect;
+    if (aspect >= 1) return { distance: CAMERA.distance, height: CAMERA.height };
+    const k = Math.min(1, (1 - aspect) / 0.55);
+    return {
+      distance: CAMERA.distance * (1 + (CAMERA.portraitDistanceMult - 1) * k),
+      height: CAMERA.height * (1 + (CAMERA.portraitHeightMult - 1) * k),
+    };
+  }
+
   follow(dt: number, position: Vec3Like, forward: Vec3Like, immediate = false): void {
-    const desiredX = position.x - forward.x * CAMERA.distance;
-    const desiredY = position.y + CAMERA.height;
-    const desiredZ = position.z - forward.z * CAMERA.distance;
+    const { distance, height } = this.framing();
+    const desiredX = position.x - forward.x * distance;
+    const desiredY = position.y + height;
+    const desiredZ = position.z - forward.z * distance;
     const alpha = immediate ? 1 : 1 - Math.exp(-dt / CAMERA.lag);
     this.camera.position.x += (desiredX - this.camera.position.x) * alpha;
     this.camera.position.y += (desiredY - this.camera.position.y) * alpha;
@@ -87,7 +99,8 @@ export class CameraRig {
   }
 
   snap(position: Vec3Like, forward: Vec3Like): void {
-    this.camera.position.set(position.x - forward.x * CAMERA.distance, position.y + CAMERA.height, position.z - forward.z * CAMERA.distance);
+    const { distance, height } = this.framing();
+    this.camera.position.set(position.x - forward.x * distance, position.y + height, position.z - forward.z * distance);
     this.look.set(position.x + forward.x * 8, position.y + 1.4, position.z + forward.z * 8);
     this.camera.lookAt(this.look);
   }

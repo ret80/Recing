@@ -84,10 +84,33 @@ export class PhysicsWorld {
     return body;
   }
 
-  addWall(x: number, z: number, halfLength: number, yaw: number, height = 1.4): Body {
+  /**
+   * Участок дорожного полотна между двумя точками сплайна.
+   * Верхняя грань бокса проходит точно через a и b — поэтому уклон
+   * получается честным, без «ступенек» из горизонтальных плит.
+   */
+  addTrackSegment(a: Vec3, b: Vec3, halfWidth: number, thickness = 1.2): Body {
+    const delta = b.vsub(a);
+    const horizontal = Math.hypot(delta.x, delta.z);
+    const length = Math.hypot(horizontal, delta.y);
+    const yaw = Math.atan2(delta.x, delta.z);
+    const pitch = Math.atan2(delta.y, Math.max(1e-4, horizontal));
+    const rotation = new Quaternion().setFromEuler(0, yaw, 0);
+    rotation.mult(new Quaternion().setFromAxisAngle(new Vec3(1, 0, 0), -pitch), rotation);
+    rotation.normalize();
+    const up = rotation.vmult(new Vec3(0, 1, 0));
+    const body = new Body({ mass: 0, material: this.groundMaterial });
+    body.addShape(new Box(new Vec3(halfWidth, thickness, length / 2 + 0.02)));
+    body.position.copy(a.clone().vadd(b).scale(0.5).vsub(up.scale(thickness)));
+    body.quaternion.copy(rotation);
+    this.world.addBody(body);
+    return body;
+  }
+
+  addWall(x: number, z: number, halfLength: number, yaw: number, height = 1.4, baseY = 0): Body {
     const body = new Body({ mass: 0, material: this.wallMaterial });
     body.addShape(new Box(new Vec3(0.5, height, halfLength)));
-    body.position.set(x, height, z);
+    body.position.set(x, baseY + height, z);
     body.quaternion.setFromEuler(0, yaw, 0);
     this.world.addBody(body);
     return body;
@@ -134,6 +157,17 @@ export class PhysicsWorld {
   removeBody(body: Body | null): void {
     if (!body) return;
     this.world.removeBody(body);
+  }
+
+  /**
+   * Выравнивает данные интерполяции с текущим положением. Нужно после
+   * телепорта/спавна: иначе первый кадр рисуется по старым значениям.
+   */
+  static syncInterpolation(body: Body): void {
+    body.previousPosition.copy(body.position);
+    body.interpolatedPosition.copy(body.position);
+    body.previousQuaternion.copy(body.quaternion);
+    body.interpolatedQuaternion.copy(body.quaternion);
   }
 
   raycast(from: Vec3, to: Vec3, skipBody: Body | null = null): RaycastHit | null {

@@ -77,7 +77,7 @@ export class RaceScene {
   }
 
   private buildGround(zone: ZoneSpec, track: TrackDefinition): void {
-    if (!zone.hasCliffs) {
+    if (track.solidGround) {
       const ground = this.renderer.plane(2600, 2600, zone.palette.ground);
       ground.position.set(0, -0.06, 0);
       this.addObject(ground);
@@ -87,16 +87,21 @@ export class RaceScene {
       const abyss = this.renderer.plane(4000, 4000, 0x1a1110);
       abyss.position.set(0, -60, 0);
       this.addObject(abyss);
+      if (track.layout === 'hills') {
+        // Горный склон под полотном: широкая обочина, повторяющая рельеф.
+        const skirtPoints = track.waypoints.map((wp) => ({ ...wp, position: wp.position.clone() }));
+        for (const wp of skirtPoints) wp.position.y -= 0.32;
+        const skirt = this.renderer.createTrackRibbon(skirtPoints, track.width * 2.4, zone.palette.ground);
+        this.addObject(skirt);
+      }
     }
-    // Дорожное полотно физически собирается из боксов вдоль сплайна.
+    // Дорожное полотно физически собирается из наклонных боксов вдоль сплайна.
     const count = track.waypoints.length;
     const step = track.waypoints.length > 260 ? 2 : 1;
     for (let i = 0; i < count; i += step) {
       const a = track.waypoints[i] as Waypoint;
       const b = track.waypoints[(i + step) % count] as Waypoint;
-      const mid = a.position.clone().vadd(b.position).scale(0.5);
-      const length = a.position.distanceTo(b.position) + 0.5;
-      this.physics.addGroundBox(mid.x, mid.z, track.width / 2 + 0.6, length / 2, yawOf(a));
+      this.physics.addTrackSegment(a.position, b.position, track.width / 2 + 0.6);
     }
   }
 
@@ -119,10 +124,10 @@ export class RaceScene {
       for (const side of [-1, 1]) {
         const offset = mid.clone().vadd(a.right.scale(side * (track.width / 2 + 0.55)));
         const wall = this.renderer.box(0.7, 2.6, length, wallColor);
-        wall.position.set(offset.x, 1.3, offset.z);
+        wall.position.set(offset.x, offset.y + 1.3, offset.z);
         wall.rotation.y = yaw;
         this.addObject(wall);
-        this.physics.addWall(offset.x, offset.z, length / 2, yaw);
+        this.physics.addWall(offset.x, offset.z, length / 2, yaw, 1.4, offset.y);
       }
     }
   }
@@ -131,11 +136,11 @@ export class RaceScene {
     for (const hazard of track.hazards) {
       const spec = SURFACES[hazard.surface];
       const disc = this.renderer.cylinder(hazard.radius, 0.08, spec.color, 20, { emissive: spec.lethal ? 0.45 : 0.15 });
-      disc.position.set(hazard.center.x, 0.07, hazard.center.z);
+      disc.position.set(hazard.center.x, hazard.center.y + 0.07, hazard.center.z);
       this.addObject(disc);
       if (spec.lethal) {
         const glow = this.renderer.cylinder(hazard.radius * 1.04, 0.04, spec.color, 24, { emissive: 0.9, opacity: 0.35 });
-        glow.position.set(hazard.center.x, 0.12, hazard.center.z);
+        glow.position.set(hazard.center.x, hazard.center.y + 0.12, hazard.center.z);
         this.addObject(glow);
       }
     }
@@ -145,7 +150,7 @@ export class RaceScene {
     for (const pad of track.boostPads) {
       const yaw = Math.atan2(pad.tangent.x, pad.tangent.z);
       const group = this.renderer.box(4.4, 0.09, 2.6, COLORS.boost, { emissive: 0.75 });
-      group.position.set(pad.center.x, 0.09, pad.center.z);
+      group.position.set(pad.center.x, pad.center.y + 0.09, pad.center.z);
       group.rotation.y = yaw;
       this.addObject(group);
       const arrow = this.renderer.box(1.0, 0.1, 1.6, 0xffffff, { emissive: 1 });
@@ -158,7 +163,7 @@ export class RaceScene {
     for (const ramp of track.ramps) {
       const yaw = Math.atan2(ramp.tangent.x, ramp.tangent.z);
       const mesh = this.renderer.createRampVisual(ramp.halfWidth * 2, ramp.halfLength * 2, 1.1, COLORS.ramp);
-      mesh.position.set(ramp.center.x, 0.03, ramp.center.z);
+      mesh.position.set(ramp.center.x, ramp.center.y + 0.03, ramp.center.z);
       mesh.rotation.y = yaw;
       this.addObject(mesh);
     }
@@ -171,7 +176,7 @@ export class RaceScene {
       const isFinish = checkpointIndex === 0;
       const color = isFinish ? COLORS.finish : COLORS.gate;
       const group = new Transform();
-      group.position.set(wp.position.x, 0, wp.position.z);
+      group.position.set(wp.position.x, wp.position.y, wp.position.z);
       group.rotation.y = yawOf(wp);
       for (const side of [-1, 1]) {
         const post = this.renderer.box(0.5, 4.2, 0.5, color, { emissive: isFinish ? 0.7 : 0.2 });
@@ -185,7 +190,7 @@ export class RaceScene {
           2.1,
           0.25,
           yawOf(wp),
-          2.1,
+          wp.position.y + 2.1,
         );
       }
       const beam = this.renderer.box(track.width + 1.2, 0.35, 0.35, color, { emissive: isFinish ? 0.8 : 0.25 });
@@ -209,7 +214,8 @@ export class RaceScene {
       const color = random() > 0.6 ? zone.palette.accent : zone.palette.ground;
       const pile = this.renderer.box(width, height, depth, color);
       const pileYaw = random() * Math.PI;
-      pile.position.set(pos.x, height / 2 - 0.05, pos.z);
+      const baseY = pos.y - 1.2;
+      pile.position.set(pos.x, baseY + height / 2, pos.z);
       pile.rotation.y = pileYaw;
       this.addObject(pile);
       this.physics.addStaticBox(
@@ -219,7 +225,7 @@ export class RaceScene {
         height / 2,
         depth / 2,
         pileYaw,
-        height / 2 - 0.05,
+        baseY + height / 2,
       );
     }
     // Дальние «горы»/остовы для силуэта.
