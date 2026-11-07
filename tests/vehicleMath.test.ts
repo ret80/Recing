@@ -40,9 +40,9 @@ describe('vehicleMath', () => {
     expect(applyDrag(20, 0.5, 1 / 60)).toBeLessThan(20);
   });
 
-  it('clamps forward speed to max speed and allows reverse up to 60%', () => {
+  it('clamps forward speed to max speed and allows reverse up to 50%', () => {
     expect(clampForwardSpeed(100, 30)).toBe(30);
-    expect(clampForwardSpeed(-100, 30)).toBeCloseTo(-18);
+    expect(clampForwardSpeed(-100, 30)).toBeCloseTo(-15);
     expect(clampForwardSpeed(100, 30, 1.35)).toBeCloseTo(40.5);
   });
 
@@ -67,6 +67,8 @@ describe('vehicleMath', () => {
 
   it('scales steering with speed and reverses it in reverse', () => {
     expect(steeringYawRate(1, 0)).toBe(0);
+    expect(steeringYawRate(1, PHYSICS.steerDeadSpeed)).toBe(0);
+    expect(steeringYawRate(1, -(PHYSICS.steerDeadSpeed - 0.01))).toBe(0);
     expect(steeringYawRate(1, PHYSICS.steerMinSpeed)).toBeCloseTo(PHYSICS.steerRate);
     expect(steeringYawRate(1, -PHYSICS.steerMinSpeed)).toBeCloseTo(-PHYSICS.steerRate);
     expect(steeringYawRate(-1, PHYSICS.steerMinSpeed)).toBeCloseTo(-PHYSICS.steerRate);

@@ -175,8 +175,18 @@ export class RaceScene {
       group.rotation.y = yawOf(wp);
       for (const side of [-1, 1]) {
         const post = this.renderer.box(0.5, 4.2, 0.5, color, { emissive: isFinish ? 0.7 : 0.2 });
-        post.position.set(side * (track.width / 2 + 0.4), 2.1, 0);
+        const offset = side * (track.width / 2 + 0.4);
+        post.position.set(offset, 2.1, 0);
         group.addChild(post);
+        this.physics.addStaticBox(
+          wp.position.x + wp.right.x * offset,
+          wp.position.z + wp.right.z * offset,
+          0.25,
+          2.1,
+          0.25,
+          yawOf(wp),
+          2.1,
+        );
       }
       const beam = this.renderer.box(track.width + 1.2, 0.35, 0.35, color, { emissive: isFinish ? 0.8 : 0.25 });
       beam.position.set(0, 4.3, 0);
@@ -198,9 +208,19 @@ export class RaceScene {
       const depth = 1.5 + random() * 7;
       const color = random() > 0.6 ? zone.palette.accent : zone.palette.ground;
       const pile = this.renderer.box(width, height, depth, color);
+      const pileYaw = random() * Math.PI;
       pile.position.set(pos.x, height / 2 - 0.05, pos.z);
-      pile.rotation.y = random() * Math.PI;
+      pile.rotation.y = pileYaw;
       this.addObject(pile);
+      this.physics.addStaticBox(
+        pos.x,
+        pos.z,
+        width / 2,
+        height / 2,
+        depth / 2,
+        pileYaw,
+        height / 2 - 0.05,
+      );
     }
     // Дальние «горы»/остовы для силуэта.
     for (let i = 0; i < 24; i += 1) {

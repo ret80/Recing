@@ -93,6 +93,24 @@ export class PhysicsWorld {
     return body;
   }
 
+  /** Статический бокс произвольного размера — препятствия, столбы, кубы. */
+  addStaticBox(
+    x: number,
+    z: number,
+    halfWidth: number,
+    halfHeight: number,
+    halfDepth: number,
+    yaw: number,
+    y = halfHeight,
+  ): Body {
+    const body = new Body({ mass: 0, material: this.wallMaterial });
+    body.addShape(new Box(new Vec3(halfWidth, halfHeight, halfDepth)));
+    body.position.set(x, y, z);
+    body.quaternion.setFromEuler(0, yaw, 0);
+    this.world.addBody(body);
+    return body;
+  }
+
   createCarBody(stats: ComputedStats, position: Vec3, yaw: number): Body {
     const { width, height, length, shapeOffsetY } = PHYSICS.chassis;
     const body = new Body({

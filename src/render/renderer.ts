@@ -25,6 +25,8 @@ export class GameRenderer {
   readonly camera: Camera;
   readonly materials: MaterialCache;
   readonly carWheels = new Map<Transform, Transform[]>();
+  /** Поворотные узлы передних колёс (только у колёсной техники). */
+  readonly carSteerPivots = new Map<Transform, Transform[]>();
   private resizeObserver: ResizeObserver | null = null;
   private maxDpr: number = RENDER.highDpr;
   private disposed = false;
@@ -139,6 +141,7 @@ export class GameRenderer {
   createCarVisual(mainColor: number, accentColor: number, chassis: 'wheeled' | 'tracked' | 'hover'): Transform {
     const root = new Transform();
     const wheels: Transform[] = [];
+    const steerPivots: Transform[] = [];
     const dark = 0x1c1c1c;
     const trim = 0x6b6b6b;
 
@@ -186,15 +189,19 @@ export class GameRenderer {
         for (const front of [-1, 1]) {
           const wheel = new Mesh(this.gl, { geometry: wheelGeo, program: wheelProgram });
           wheel.frustumCulled = false;
-          wheel.position.set(side * 1.02, chassis === 'tracked' ? -0.18 : -0.33, front * 1.25);
           if (chassis !== 'tracked') wheel.rotation.z = Math.PI / 2;
-          root.addChild(wheel);
+          const pivot = new Transform();
+          pivot.position.set(side * 1.02, chassis === 'tracked' ? -0.18 : -0.33, front * 1.25);
+          pivot.addChild(wheel);
+          root.addChild(pivot);
           wheels.push(wheel);
+          if (chassis === 'wheeled' && front === 1) steerPivots.push(pivot);
         }
       }
     }
 
     this.carWheels.set(root, wheels);
+    this.carSteerPivots.set(root, steerPivots);
     return root;
   }
 

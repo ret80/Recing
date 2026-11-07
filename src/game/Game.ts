@@ -161,6 +161,7 @@ export class Game {
       if (object) {
         this.renderer.remove(object);
         this.renderer.carWheels.delete(object);
+        this.renderer.carSteerPivots.delete(object);
         this.visuals.delete(id);
       }
     });
@@ -394,6 +395,7 @@ export class Game {
       }
     }
 
+    for (const id of this.carIds) this.updateWheelSteer(id);
     for (const id of this.carIds) this.vehiclePreStep(id, dt);
     this.physics.step(dt);
     for (const id of this.carIds) {
@@ -415,6 +417,18 @@ export class Game {
   }
 
   // ------------------------------------------------------------- car movement
+
+  /** Визуально поворачивает передние колёса в сторону руля. */
+  private updateWheelSteer(id: EntityId): void {
+    const visual = this.visuals.get(id);
+    const input = this.world.get(id, VehicleInput);
+    const carState = this.world.get(id, CarState);
+    if (!visual || !input || !carState) return;
+    const pivots = this.renderer.carSteerPivots.get(visual);
+    if (!pivots || pivots.length === 0) return;
+    const angle = carState.phase === 'alive' ? input.steer * PHYSICS.steerVisualAngle : 0;
+    for (const pivot of pivots) pivot.rotation.y = angle;
+  }
 
   private vehiclePreStep(id: EntityId, dt: number): void {
     const carState = this.world.get(id, CarState);
@@ -442,13 +456,12 @@ export class Game {
     }
     if (input.brake > 0) {
       if (speed > 0.5) {
+        // Торможение на переднем ходу.
         const dv = forward.scale(-stats.acceleration * input.brake * 0.85 * dt);
         body.velocity.vadd(dv, body.velocity);
-      } else if (speed < -0.5) {
-        const dv = forward.scale(stats.acceleration * input.brake * 0.85 * dt);
-        body.velocity.vadd(dv, body.velocity);
       } else {
-        const dv = forward.scale(-stats.acceleration * 0.5 * input.brake * dt);
+        // Задний ход: держим S и едем назад, пока не достигнут лимит.
+        const dv = forward.scale(-stats.acceleration * PHYSICS.reverseAccelFactor * input.brake * dt);
         body.velocity.vadd(dv, body.velocity);
       }
     }

@@ -24,9 +24,14 @@ export function applyDrag(speed: number, surfaceDrag: number, dt: number): numbe
   return speed * Math.exp(-surfaceDrag * PHYSICS.dragRate * dt);
 }
 
-export function clampForwardSpeed(forwardSpeed: number, maxSpeed: number, nitroMult = 1): number {
+export function clampForwardSpeed(
+  forwardSpeed: number,
+  maxSpeed: number,
+  nitroMult = 1,
+  reverseFactor = PHYSICS.maxReverseFactor,
+): number {
   const limit = maxSpeed * nitroMult;
-  return Math.max(-limit * 0.6, Math.min(limit, forwardSpeed));
+  return Math.max(-limit * reverseFactor, Math.min(limit, forwardSpeed));
 }
 
 export function rebuildVelocity(
@@ -51,7 +56,11 @@ export function idealCornerSpeed(maxSpeed: number, skill: number, grip: number, 
 }
 
 export function steeringYawRate(steer: number, speed: number): number {
-  const speedFactor = Math.min(1, Math.abs(speed) / PHYSICS.steerMinSpeed);
+  const magnitude = Math.abs(speed);
+  // Мёртвая зона: стоящая машина не должна разворачиваться на месте.
+  if (magnitude <= PHYSICS.steerDeadSpeed) return 0;
+  const span = Math.max(1e-4, PHYSICS.steerMinSpeed - PHYSICS.steerDeadSpeed);
+  const speedFactor = Math.min(1, (magnitude - PHYSICS.steerDeadSpeed) / span);
   const direction = speed < 0 ? -1 : 1;
   return steer * PHYSICS.steerRate * speedFactor * direction;
 }

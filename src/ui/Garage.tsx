@@ -93,20 +93,23 @@ export function Garage({
             {profile.seasonLaps}/5
           </div>
         </div>
-        <div className="row">
+        <div className="row garage-wallet-row">
           <div className="garage-wallet">
             <span>
               Баланс: <strong>{money(profile.money)}</strong>
             </span>
             <span className="muted">Зона: {snapshot.zoneName || `#${profile.zone}`}</span>
           </div>
-          <button className="ghost" onClick={onSettings}>
-            Настройки
-          </button>
-          <button className="ghost" onClick={() => game.goToMenu()}>
-            Меню
-          </button>
         </div>
+      </div>
+
+      <div className="garage-actions">
+        <button className="ghost" onClick={onSettings}>
+          Настройки
+        </button>
+        <button className="ghost" onClick={() => game.goToMenu()}>
+          Меню
+        </button>
       </div>
 
       <div className="garage">
@@ -141,7 +144,7 @@ export function Garage({
           </div>
         </aside>
 
-        <div className="garage-side" style={{ alignSelf: 'start', marginTop: 64 }}>
+        <div className="garage-side center">
           <div className="panel-block">
             <h3>{car.name}</h3>
             <div className="small muted" style={{ marginBottom: 10 }}>
