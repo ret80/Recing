@@ -72,7 +72,7 @@ export class InputSystem {
   update(input: VehicleInput): void {
     let throttle = this.isDown('throttle') ? 1 : 0;
     let brake = this.isDown('brake') ? 1 : 0;
-    let steer = (this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0);
+    let steer = (this.isDown('left') ? 1 : 0) - (this.isDown('right') ? 1 : 0);
     let fireFront = this.isDown('fireFront');
     let fireRear = this.isDown('fireRear');
     let fireBoost = this.isDown('fireBoost');
@@ -82,7 +82,7 @@ export class InputSystem {
       const pad = pads.find((p) => p && p.connected);
       if (pad) {
         const axis = pad.axes[0] ?? 0;
-        if (Math.abs(axis) > 0.12) steer = Math.max(-1, Math.min(1, axis));
+        if (Math.abs(axis) > 0.12) steer = Math.max(-1, Math.min(1, -axis));
         const rt = pad.buttons[7]?.value ?? 0;
         const lt = pad.buttons[6]?.value ?? 0;
         if (rt > 0.05) throttle = Math.max(throttle, rt);

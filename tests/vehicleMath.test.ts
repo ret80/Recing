@@ -70,6 +70,7 @@ describe('vehicleMath', () => {
     expect(steeringYawRate(1, PHYSICS.steerMinSpeed)).toBeCloseTo(PHYSICS.steerRate);
     expect(steeringYawRate(1, -PHYSICS.steerMinSpeed)).toBeCloseTo(-PHYSICS.steerRate);
     expect(steeringYawRate(-1, PHYSICS.steerMinSpeed)).toBeCloseTo(-PHYSICS.steerRate);
+    expect(steeringYawRate(-1, -PHYSICS.steerMinSpeed)).toBeCloseTo(PHYSICS.steerRate);
   });
 
   it('normalizes angles into the -PI..PI range', () => {

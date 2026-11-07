@@ -436,13 +436,21 @@ export class Game {
     forward.normalize();
     const speed = body.velocity.dot(forward);
     const nitro = engine.nitroTimer > 0 ? WEAPON_TUNING.nitroAccelMult : 1;
-    const accel = stats.acceleration * stats.mass * nitro;
     if (input.throttle > 0) {
-      body.applyForce(forward.scale(accel * input.throttle));
+      const dv = forward.scale(stats.acceleration * nitro * input.throttle * dt);
+      body.velocity.vadd(dv, body.velocity);
     }
     if (input.brake > 0) {
-      const braking = Math.abs(speed) > 0.5 ? -Math.sign(speed) : -1;
-      body.applyForce(forward.scale(braking * accel * input.brake * 0.85));
+      if (speed > 0.5) {
+        const dv = forward.scale(-stats.acceleration * input.brake * 0.85 * dt);
+        body.velocity.vadd(dv, body.velocity);
+      } else if (speed < -0.5) {
+        const dv = forward.scale(stats.acceleration * input.brake * 0.85 * dt);
+        body.velocity.vadd(dv, body.velocity);
+      } else {
+        const dv = forward.scale(-stats.acceleration * 0.5 * input.brake * dt);
+        body.velocity.vadd(dv, body.velocity);
+      }
     }
 
     const grounded = physics.onGround;
@@ -489,7 +497,8 @@ export class Game {
     const { forwardSpeed, lateralSpeed } = decomposeVelocity(body.velocity, forward, right);
     let newForward = applyDrag(forwardSpeed, surface.drag, dt);
     if (input.brake > 0 && newForward > 0) {
-      newForward *= Math.max(0, 1 - 2.8 * input.brake * dt);
+      const brakeDecel = 2.8 * input.brake * dt * stats.maxSpeed;
+      newForward = Math.max(0, newForward - brakeDecel);
     }
     const lateral = dampLateral(lateralSpeed, stats.grip, surface.grip, dt);
     const nitroMult = engine.nitroTimer > 0 ? WEAPON_TUNING.nitroSpeedMult : 1;
@@ -499,9 +508,11 @@ export class Game {
     body.velocity.copy(velocity);
 
     // Мягкая стабилизация крена/тангажа: машина не переворачивается на ровной трассе.
-    const yaw = Math.atan2(forward.x, forward.z);
-    const upright = new Quaternion().setFromEuler(0, yaw, 0);
-    body.quaternion.slerp(upright, 1 - Math.exp(-5 * dt), body.quaternion);
+    // Руление управляется исключительно angularVelocity.y — slerp удалён,
+    // так как он боролся с angularVelocity и вызывал рывки при поворотах.
+    const stabilize = Math.exp(-PHYSICS.rollStabilization * dt);
+    body.angularVelocity.x *= stabilize;
+    body.angularVelocity.z *= stabilize;
   }
 
   private syncCarTransform(id: EntityId): void {

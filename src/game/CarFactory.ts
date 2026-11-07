@@ -21,7 +21,7 @@ import {
   type EntityId,
   type World,
 } from '../ecs/components';
-import { CHASSIS_REST_Y, PhysicsWorld } from '../physics/physicsWorld';
+import { CHASSIS_REST_Y, PhysicsWorld, yawQuaternion } from '../physics/physicsWorld';
 import type { GameRenderer } from '../render/renderer';
 
 export type CarSpawnOptions = {
@@ -59,7 +59,10 @@ export function spawnCar(options: CarSpawnOptions): SpawnedCar {
   body.collisionFilterGroup = 2;
   body.collisionFilterMask = -1;
 
-  const transform = new Transform(new Vec3(position.x, CHASSIS_REST_Y, position.z));
+  const transform = new Transform(
+    new Vec3(position.x, CHASSIS_REST_Y, position.z),
+    yawQuaternion(options.yaw),
+  );
   world.add(id, transform);
   world.add(id, new Physics(body));
   world.add(id, new Chassis(car.chassis, car.chassis === 'hover' ? car.bounce * 1.2 + 0.6 : 0, IMMUNITIES[car.chassis] ?? []));
