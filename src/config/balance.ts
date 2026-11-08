@@ -503,12 +503,35 @@ export type AIConfig = {
   reactionMax: number;
   reactionJitter: number;
   stuckSpeed: number;
-  stuckTime: number;
   evadeTime: number;
   lineOffsetMax: number;
   threatAheadRange: number;
   threatBehindRange: number;
   rearWeaponDelaySec: number;
+  /** Дальность щупа перед/позади машины для поиска стен и препятствий (м). */
+  probeDistance: number;
+  /** Сколько секунд ИИ откатывается назад, прежде чем попробовать развернуться. */
+  reverseBurstSec: number;
+  /** Сколько секунд длится одна фаза разворота (назад/вперёд). */
+  turnPhaseSec: number;
+  /** Максимальное время попытки разворота, после которого машина респаунится. */
+  turnAroundTimeoutSec: number;
+  /** Курс считается «против трассы», если ошибка больше этого угла (рад). */
+  wrongWayAngle: number;
+  /** Ошибка курса, при которой разворот считается завершённым (рад). */
+  turnDoneAngle: number;
+  /** Сколько секунд машина должна простоять, прежде чем респауниться. */
+  recoverStuckSec: number;
+  /** Сколько секунд машина может лежать вверх колёсами до респауна. */
+  flippedRecoverSec: number;
+  /** Сколько секунд ИИ помнит удар об отбойник. */
+  wallHitMemorySec: number;
+  /** Минимальное время удержания выбранного манёвра (с). */
+  minManeuverTime: number;
+  /** Сила руля при откате назад. */
+  reverseSteer: number;
+  /** Сила руля при развороте. */
+  turnSteer: number;
 };
 
 export const AI_CONFIG: AIConfig = {
@@ -518,7 +541,6 @@ export const AI_CONFIG: AIConfig = {
   reactionMax: 0.5,
   reactionJitter: 0.1,
   stuckSpeed: 2,
-  stuckTime: 3,
   evadeTime: 1.5,
   lineOffsetMax: 2,
   /** Дистанции поиска препятствий/угроз. */
@@ -526,6 +548,18 @@ export const AI_CONFIG: AIConfig = {
   threatBehindRange: 20,
   /** ИИ не использует заднее оружие на стартовой сетке. */
   rearWeaponDelaySec: 5,
+  probeDistance: 5,
+  reverseBurstSec: 0.9,
+  turnPhaseSec: 0.9,
+  turnAroundTimeoutSec: 5,
+  wrongWayAngle: 1.9,
+  turnDoneAngle: 0.5,
+  recoverStuckSec: 6,
+  flippedRecoverSec: 1.5,
+  wallHitMemorySec: 1.2,
+  minManeuverTime: 0.35,
+  reverseSteer: 0.85,
+  turnSteer: 1,
 };
 
 export const WEAPON_TUNING = {

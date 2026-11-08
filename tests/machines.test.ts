@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { createActor } from 'xstate';
-import { createAIMachine } from '../src/ai/aiMachine';
 import { gameMachine } from '../src/game/gameMachine';
 
 describe('gameMachine', () => {
@@ -54,40 +53,3 @@ describe('gameMachine', () => {
   });
 });
 
-describe('AI machine', () => {
-  it('transitions between cruising, attacking and evading', () => {
-    const actor = createActor(createAIMachine(0.8, 0.9));
-    actor.start();
-    expect(actor.getSnapshot().value).toBe('cruising');
-
-    actor.send({ type: 'ENEMY_SPOTTED', inCone: true });
-    expect(actor.getSnapshot().value).toBe('attacking');
-    expect(actor.getSnapshot().context.attacks).toBe(1);
-
-    actor.send({ type: 'LOST_TARGET' });
-    expect(actor.getSnapshot().value).toBe('cruising');
-
-    actor.send({ type: 'THREAT_BEHIND' });
-    expect(actor.getSnapshot().value).toBe('evading');
-    expect(actor.getSnapshot().context.lastThreatSide).toBe('back');
-
-    actor.send({ type: 'CLEAR' });
-    expect(actor.getSnapshot().value).toBe('cruising');
-  });
-
-  it('ignores spotted events outside the cone', () => {
-    const actor = createActor(createAIMachine(0.5, 0.5));
-    actor.start();
-    actor.send({ type: 'ENEMY_SPOTTED', inCone: false });
-    expect(actor.getSnapshot().value).toBe('cruising');
-  });
-
-  it('enters recovering on STUCK', () => {
-    const actor = createActor(createAIMachine(0.5, 0.5));
-    actor.start();
-    actor.send({ type: 'STUCK' });
-    expect(actor.getSnapshot().value).toBe('recovering');
-    actor.send({ type: 'RECOVERED' });
-    expect(actor.getSnapshot().value).toBe('cruising');
-  });
-});

@@ -1,9 +1,9 @@
 import type { Body } from 'cannon-es';
 import { Quaternion, Vec3 } from 'cannon-es';
-import type { AnyActorRef } from 'xstate';
 import type { ChassisType, SurfaceType } from '../config/balance';
 import type { BoostType, FrontWeaponType, RearWeaponType } from '../config/weapons';
 import type { ComputedStats, Drivetrain } from '../config/cars';
+import { AIBrain } from '../ai/utility';
 
 export type EntityId = number;
 
@@ -275,17 +275,10 @@ export class RaceStanding {
 }
 
 export class AI {
-  actor: AnyActorRef;
-  targetWaypoint = 0;
-  aggressionLevel: number;
-  skill: number;
-  personality: string;
+  brain: AIBrain;
 
-  constructor(actor: AnyActorRef, aggressionLevel: number, skill: number, personality: string) {
-    this.actor = actor;
-    this.aggressionLevel = aggressionLevel;
-    this.skill = skill;
-    this.personality = personality;
+  constructor(aggressionLevel: number, skill: number, personality: string) {
+    this.brain = new AIBrain(aggressionLevel, skill, personality);
   }
 }
 
@@ -319,8 +312,9 @@ export class EngineState {
   spinOutRate = 0;
   rampInside = false;
   jumpQueued = false;
-  stuckTimer = 0;
   lastImpact = 0;
+  /** Время последнего удара об отбойник/статическое препятствие. */
+  lastWallHit = 0;
   padCooldown = 0;
 
   constructor() {
@@ -329,8 +323,8 @@ export class EngineState {
     this.spinOutRate = 0;
     this.rampInside = false;
     this.jumpQueued = false;
-    this.stuckTimer = 0;
     this.lastImpact = 0;
+    this.lastWallHit = 0;
     this.padCooldown = 0;
   }
 }

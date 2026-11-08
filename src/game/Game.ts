@@ -58,7 +58,6 @@ import {
   type TrackDefinition,
   type Waypoint,
 } from '../track/track';
-import { createAIMachine } from '../ai/aiMachine';
 import { GameStore, type HudCar, type RaceResultRow } from './GameStore';
 import { InputSystem, type TouchState } from './InputSystem';
 import { AudioSystem } from './AudioSystem';
@@ -324,10 +323,7 @@ export class Game {
         mainColor: AI_COLORS[index] ?? 0x888888,
         accentColor: zone.palette.accent,
       });
-      const machine = createAIMachine(profile.aggression, profile.skill);
-      const aiActor = createActor(machine);
-      aiActor.start();
-      this.world.add(spawned.id, new AI(aiActor, profile.aggression, profile.skill, profile.personality));
+      this.world.add(spawned.id, new AI(profile.aggression, profile.skill, profile.personality));
       this.carIds.push(spawned.id);
       this.registerCarBody(spawned.id, spawned.body);
       this.registerVisual(spawned.id, spawned.visual);
@@ -337,7 +333,13 @@ export class Game {
   private registerCarBody(id: EntityId, body: Body): void {
     this.bodyToEntity.set(body, id);
     PhysicsWorld.syncInterpolation(body);
-    body.addEventListener('collide', (event: { body: Body }) => this.onCarCollide(id, event.body));
+    body.addEventListener('collide', (event: { body: Body }) => {
+      this.onCarCollide(id, event.body);
+      if (event.body.material === this.physics.wallMaterial) {
+        const engine = this.world.get(id, EngineState);
+        if (engine) engine.lastWallHit = this.raceTime;
+      }
+    });
   }
 
   private registerVisual(id: EntityId, object: import('ogl').Transform): void {
@@ -1475,7 +1477,9 @@ export class Game {
       engine.spinOutTimer = 0;
       engine.rampInside = false;
       engine.padCooldown = 0;
+      engine.lastWallHit = 0;
     }
+    this.world.get(id, AI)?.brain.reset();
     this.refillWeapons(id, AMMO.respawnFrontShare, AMMO.respawnRearShare, AMMO.respawnBoostShare);
     if (render) render.visible = true;
     state.phase = 'alive';
@@ -1575,68 +1579,122 @@ export class Game {
     input.fireBoostPressed = false;
     if (state.phase !== 'alive' || lap.finished) return;
 
+    const brain = ai.brain;
     const body = physics.body;
+    const forward = forwardVector(body.quaternion);
+    forward.y = 0;
+    if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
+    forward.normalize();
     const speed = body.velocity.length();
-    let targetIndex = ai.targetWaypoint;
-    let target = waypointAt(this.track, targetIndex);
-    let dx = target.racingLine.x - body.position.x;
-    let dz = target.racingLine.z - body.position.z;
-    if (dx * dx + dz * dz < 15 * 15) {
-      targetIndex = (targetIndex + 1) % this.track.waypoints.length;
-      ai.targetWaypoint = targetIndex;
-      target = waypointAt(this.track, targetIndex);
-      dx = target.racingLine.x - body.position.x;
-      dz = target.racingLine.z - body.position.z;
-    }
-    const desiredYaw = Math.atan2(dx, dz);
+    const forwardSpeed = body.velocity.dot(forward);
     const currentYaw = quaternionYaw(body.quaternion);
-    const angle = angleDifference(desiredYaw, currentYaw);
-    input.steer = Math.max(-1, Math.min(1, angle * 1.8));
 
-    const personalityFactor = ai.personality === 'boss' ? 1 : ai.personality === 'meat' ? 0.86 : 0.95;
+    // Ближайшая точка трассы нужна и для прицеливания, и для понимания,
+    // куда сейчас смотрит нос машины после столкновения/разворота.
+    const nearest = this.nearestWaypointIndex(body.position);
+    brain.targetWaypoint = nearest;
+    const here = waypointAt(this.track, nearest);
+    const trackHeadingError = angleDifference(
+      Math.atan2(here.tangent.x, here.tangent.z),
+      currentYaw,
+    );
+
+    const lookahead = Math.max(2, Math.min(5, 1 + Math.floor(Math.max(0, speed) / 8)));
+    const target = waypointAt(this.track, nearest + lookahead);
+    const desiredYaw = Math.atan2(
+      target.racingLine.x - body.position.x,
+      target.racingLine.z - body.position.z,
+    );
+    const yawError = angleDifference(desiredYaw, currentYaw);
+
+    const personalityFactor =
+      brain.personality === 'boss' ? 1 : brain.personality === 'meat' ? 0.86 : 0.95;
     const corner = Math.max(0.004, target.curvature);
-    let vTarget = idealCornerSpeed(stats.maxSpeed, ai.skill, stats.grip, corner) * personalityFactor;
-    if (ai.personality === 'boss' && corner > 0.02) vTarget *= 0.85;
-    input.throttle = speed < vTarget ? 1 : 0;
-    input.brake = speed > vTarget * 1.18 ? 1 : 0;
+    let targetSpeed = idealCornerSpeed(stats.maxSpeed, brain.skill, stats.grip, corner) * personalityFactor;
+    if (brain.personality === 'boss' && corner > 0.02) targetSpeed *= 0.85;
+
+    const up = body.quaternion.vmult(new Vec3(0, 1, 0));
+    const decision = brain.update(
+      dt,
+      {
+        speed,
+        forwardSpeed,
+        yawError,
+        trackHeadingError,
+        blockedAhead: this.probeObstacle(id, 1, AI_CONFIG.probeDistance),
+        blockedBehind: this.probeObstacle(id, -1, AI_CONFIG.probeDistance),
+        recentWallHit: this.raceTime - engine.lastWallHit < AI_CONFIG.wallHitMemorySec,
+        upsideDown: up.y < 0.25,
+        fell: body.position.y < WORLD.killPlaneY,
+      },
+      targetSpeed,
+    );
+
+    input.throttle = decision.throttle;
+    input.brake = decision.brake;
+    input.steer = decision.steer;
+    if (decision.respawn) {
+      this.forceRespawn(id);
+      return;
+    }
 
     const enemy = this.findEnemyInCone(id, AI_CONFIG.raycastRange, AI_CONFIG.coneDeg);
-    const snapshot = ai.actor.getSnapshot();
-    const aiState = String(snapshot.value);
-    if (enemy !== null) {
-      ai.actor.send({ type: 'ENEMY_SPOTTED', inCone: true });
-      if (aiState === 'attacking' || ai.aggressionLevel >= 0.5) input.fireFront = true;
-    } else if (aiState === 'attacking') {
-      ai.actor.send({ type: 'LOST_TARGET' });
-    }
+    if (enemy !== null) input.fireFront = true;
 
-    const threatFront = this.hasThreatAhead(id);
-    if (threatFront) {
-      ai.actor.send({ type: 'THREAT_FRONT', obstacle: true });
-      if (aiState === 'evading') {
-        if (physics.onGround && (this.world.get(id, Weapon)?.boostAmmo ?? 0) > 0) input.fireBoostPressed = true;
-        input.steer = Math.max(-1, Math.min(1, input.steer + 0.35));
-      }
-    }
     const threatBehind = this.hasThreatBehind(id);
-    if (threatBehind) {
-      ai.actor.send({ type: 'THREAT_BEHIND' });
-      const canDropRear = this.raceTime >= AI_CONFIG.rearWeaponDelaySec;
-      if (aiState === 'evading' && canDropRear && (this.world.get(id, Weapon)?.rearAmmo ?? 0) > 0) {
-        input.fireRearPressed = true;
-      }
+    if (
+      threatBehind &&
+      this.raceTime >= AI_CONFIG.rearWeaponDelaySec &&
+      (this.world.get(id, Weapon)?.rearAmmo ?? 0) > 0
+    ) {
+      input.fireRearPressed = true;
     }
-    if (!threatFront && !threatBehind && enemy === null && aiState === 'evading') ai.actor.send({ type: 'CLEAR' });
 
-    if (speed < AI_CONFIG.stuckSpeed) engine.stuckTimer += dt;
-    else engine.stuckTimer = 0;
-    if (engine.stuckTimer > AI_CONFIG.stuckTime || body.position.y < -10) {
-      ai.actor.send({ type: 'STUCK' });
-      if (String(ai.actor.getSnapshot().value) === 'recovering') {
-        this.forceRespawn(id);
-        engine.stuckTimer = 0;
+    // Объезд угрозы имеет смысл только когда ИИ едет вперёд по трассе:
+    // во время отката и разворота руль занят манёвром.
+    if (decision.maneuver === 'race' && this.hasThreatAhead(id)) {
+      input.steer = Math.max(-1, Math.min(1, input.steer + 0.35));
+      if (physics.onGround && (this.world.get(id, Weapon)?.boostAmmo ?? 0) > 0) {
+        input.fireBoostPressed = true;
       }
     }
+  }
+
+  /** Индекс ближайшей точки трассы: не даём ИИ потерять курс после разворота. */
+  private nearestWaypointIndex(position: Vec3): number {
+    let best = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    const waypoints = this.track.waypoints;
+    for (let index = 0; index < waypoints.length; index += 1) {
+      const wp = waypoints[index];
+      if (!wp) continue;
+      const dx = wp.position.x - position.x;
+      const dz = wp.position.z - position.z;
+      const distance = dx * dx + dz * dz;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    }
+    return best;
+  }
+
+  /** Щуп вперёд/назад: видит стены, машины и прочие твёрдые препятствия. */
+  private probeObstacle(id: EntityId, direction: 1 | -1, distance: number): boolean {
+    const physics = this.world.get(id, Physics);
+    if (!physics?.body) return false;
+    const body = physics.body;
+    const forward = forwardVector(body.quaternion);
+    forward.y = 0;
+    if (forward.lengthSquared() < 1e-6) return false;
+    forward.normalize();
+    const dir = forward.scale(direction);
+    const from = body.position.clone();
+    const to = from.clone().vadd(dir.scale(distance));
+    const hit = this.physics.raycast(from, to, body);
+    if (!hit) return false;
+    // Луч может зацепить полотно на подъёме — это не препятствие.
+    return hit.body?.material !== this.physics.groundMaterial;
   }
 
   private forceRespawn(id: EntityId): void {
