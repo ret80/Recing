@@ -57,6 +57,10 @@ export type LitOptions = {
   opacity?: number;
   fogNear?: number;
   fogFar?: number;
+  /** Не переиспользовать закэшированную программу: нужно для анимации uniform'ов. */
+  unique?: boolean;
+  /** Включить прозрачность, даже если начальная opacity равна 1. */
+  transparent?: boolean;
 };
 
 export type LightUniforms = {
@@ -81,6 +85,8 @@ export const DEFAULT_LIGHTING: LightUniforms = {
 export class MaterialCache {
   private gl: OGLRenderingContext;
   private cache = new Map<string, Program>();
+  /** Программы с анимируемыми uniform'ами: принадлежат одному мешу. */
+  private readonly uniquePrograms = new WeakSet<Program>();
   private lighting: LightUniforms;
 
   constructor(gl: OGLRenderingContext, lighting: LightUniforms = DEFAULT_LIGHTING) {
@@ -100,16 +106,25 @@ export class MaterialCache {
     }
   }
 
+  /** Уникальная программа не переиспользуется и её можно освободить при удалении меша. */
+  isUnique(program: Program): boolean {
+    return this.uniquePrograms.has(program);
+  }
+
   lit(color: number, options: LitOptions = {}): Program {
-    const key = `${color}:${options.emissive ?? 0}:${options.opacity ?? 1}:${options.fogNear ?? ''}:${options.fogFar ?? ''}`;
-    const cached = this.cache.get(key);
-    if (cached) return cached;
+    const opacity = options.opacity ?? 1;
+    const transparent = options.transparent ?? opacity < 1;
+    const key = `${color}:${options.emissive ?? 0}:${opacity}:${options.fogNear ?? ''}:${options.fogFar ?? ''}:${transparent ? 1 : 0}`;
+    if (!options.unique) {
+      const cached = this.cache.get(key);
+      if (cached) return cached;
+    }
     const c = new Color(color);
     const program = new Program(this.gl, {
       vertex: litVertex,
       fragment: litFragment,
-      transparent: (options.opacity ?? 1) < 1,
-      depthWrite: (options.opacity ?? 1) >= 0.99,
+      transparent,
+      depthWrite: !transparent,
       cullFace: false,
       uniforms: {
         uColor: { value: new Float32Array([c.r, c.g, c.b]) },
@@ -119,11 +134,12 @@ export class MaterialCache {
         uFogColor: { value: this.lighting.fogColor },
         uFogNear: { value: options.fogNear ?? this.lighting.fogNear },
         uFogFar: { value: options.fogFar ?? this.lighting.fogFar },
-        uOpacity: { value: options.opacity ?? 1 },
+        uOpacity: { value: opacity },
         uEmissive: { value: options.emissive ?? 0 },
       },
     });
-    this.cache.set(key, program);
+    if (!options.unique) this.cache.set(key, program);
+    else this.uniquePrograms.add(program);
     return program;
   }
 }

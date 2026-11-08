@@ -224,12 +224,15 @@ export class SurfaceState {
   grip: number;
   drag: number;
   effectTimer: number;
+  /** Сила эффекта, унаследованная от пятна (0..1). */
+  effectStrength: number;
 
   constructor(type: SurfaceType = 'asphalt', grip = 1, drag = 0) {
     this.type = type;
     this.grip = grip;
     this.drag = drag;
     this.effectTimer = 0;
+    this.effectStrength = 0;
   }
 }
 
@@ -397,10 +400,20 @@ export class Mine {
 export class Slick {
   radius: number;
   ownerId: EntityId;
+  /** Возраст пятна (с). */
+  age = 0;
+  /** Время полной видимости до начала затухания (с). */
+  lifetime: number;
+  /** Длительность затухания в альфу (с). */
+  fadeDuration: number;
+  /** Текущая прозрачность 0..1. Она же — сила эффекта на машину. */
+  opacity = 1;
 
-  constructor(radius: number, ownerId: EntityId) {
+  constructor(radius: number, ownerId: EntityId, lifetime: number, fadeDuration: number) {
     this.radius = radius;
     this.ownerId = ownerId;
+    this.lifetime = lifetime;
+    this.fadeDuration = fadeDuration;
   }
 }
 

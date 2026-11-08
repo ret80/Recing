@@ -115,6 +115,19 @@ export class GameRenderer {
 
   remove(object: Transform): void {
     this.scene.removeChild(object);
+    // Уникальные материалы и их геометрия принадлежат одному мешу (например,
+    // затухающему пятну нефти) — освобождаем GPU-ресурсы вместе с ним.
+    if (object instanceof Mesh && this.materials.isUnique(object.program)) {
+      object.program.remove();
+      object.geometry.remove();
+    }
+  }
+
+  /** Меняет прозрачность меша. Работает только с материалом, у которого есть uOpacity. */
+  setOpacity(object: object | null, opacity: number): void {
+    if (!(object instanceof Mesh)) return;
+    const uniform = object.program.uniforms.uOpacity;
+    if (uniform) uniform.value = opacity;
   }
 
   mesh(geometry: Geometry, color: number, options: LitOptions = {}): Mesh {

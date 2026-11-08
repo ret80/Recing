@@ -56,6 +56,7 @@ import {
   surfaceAtHazard,
   waypointAt,
   type TrackDefinition,
+  type Waypoint,
 } from '../track/track';
 import { createAIMachine } from '../ai/aiMachine';
 import { GameStore, type HudCar, type RaceResultRow } from './GameStore';
@@ -440,6 +441,7 @@ export class Game {
     }
     this.updateProjectiles(dt);
     this.updateMines(dt);
+    this.updateSlicks(dt);
     this.updateDebris(dt);
     this.updatePositions();
   }
@@ -742,16 +744,23 @@ export class Game {
     if (carState.phase !== 'alive') return;
     const position = physics.body.position;
     let type: SurfaceType = 'asphalt';
+    let oilStrength = 0;
     const hazard = surfaceAtHazard(this.track, position);
-    if (hazard) type = hazard;
+    if (hazard) {
+      type = hazard;
+      if (hazard === 'oil') oilStrength = 1;
+    }
 
     for (const slickId of this.world.query(Slick)) {
       const slick = this.world.get(slickId, Slick);
       const transform = this.world.get(slickId, Transform);
-      if (!slick || !transform) continue;
+      if (!slick || !transform || slick.opacity <= 0) continue;
       const dx = transform.position.x - position.x;
       const dz = transform.position.z - position.z;
-      if (dx * dx + dz * dz <= slick.radius * slick.radius) type = 'oil';
+      if (dx * dx + dz * dz <= slick.radius * slick.radius) {
+        type = 'oil';
+        oilStrength = Math.max(oilStrength, slick.opacity);
+      }
     }
 
     const immune = chassis.surfaceImmunities.includes(type);
@@ -769,17 +778,23 @@ export class Game {
     }
     if (type === 'oil') {
       surface.effectTimer = WEAPON_TUNING.slickEffectAfterExitSec;
+      surface.effectStrength = oilStrength;
     } else if (surface.type === 'oil' && surface.effectTimer > 0) {
       type = 'oil';
       surface.effectTimer = Math.max(0, surface.effectTimer - dt);
     } else {
       surface.effectTimer = 0;
+      surface.effectStrength = 0;
     }
 
     const effective = SURFACES[type];
+    // Чем прозрачнее пятно, тем слабее эффект: сцепление и сопротивление
+    // интерполируются между асфальтом и полной нефтью.
+    const strength = type === 'oil' ? surface.effectStrength : 1;
+    const base = SURFACES.asphalt;
     surface.type = type;
-    surface.grip = immune ? 1 : effective.grip;
-    surface.drag = immune ? 0 : effective.drag;
+    surface.grip = immune ? 1 : base.grip + (effective.grip - base.grip) * strength;
+    surface.drag = immune ? 0 : base.drag + (effective.drag - base.drag) * strength;
     engine.spinOutTimer = Math.max(0, engine.spinOutTimer - dt);
     engine.nitroTimer = Math.max(0, engine.nitroTimer - dt);
     engine.padCooldown = Math.max(0, engine.padCooldown - dt);
@@ -1014,15 +1029,29 @@ export class Game {
     position.y = kind === 'oilSlick' ? 0.08 : 0.45;
 
     if (kind === 'oilSlick') {
-      const slicks = this.world.query(Slick);
-      if (slicks.length >= LIMITS.slicks) {
-        const oldest = slicks[0];
-        if (oldest !== undefined) this.world.destroyEntity(oldest);
+      // При переполнении не удаляем старое пятно мгновенно, а запускаем его
+      // затухание — визуально и по эффекту оно исчезает плавно.
+      let activeCount = 0;
+      let oldest: Slick | null = null;
+      for (const slickId of this.world.query(Slick)) {
+        const slick = this.world.get(slickId, Slick);
+        if (!slick || slick.age >= slick.lifetime) continue;
+        activeCount += 1;
+        if (!oldest || slick.age > oldest.age) oldest = slick;
       }
+      if (activeCount >= LIMITS.slicks && oldest) oldest.age = oldest.lifetime;
+
       const id = this.world.createEntity();
       this.world.add(id, new Transform(position.clone()));
-      this.world.add(id, new Slick(spec.radius, ownerId));
-      const visual = this.renderer.cylinder(spec.radius, 0.05, 0x111111, 22, { emissive: 0.05 });
+      this.world.add(
+        id,
+        new Slick(spec.radius, ownerId, WEAPON_TUNING.slickLifetimeSec, WEAPON_TUNING.slickFadeSec),
+      );
+      const visual = this.renderer.cylinder(spec.radius, 0.05, 0x111111, 22, {
+        emissive: 0.05,
+        unique: true,
+        transparent: true,
+      });
       visual.position.set(position.x, 0.06, position.z);
       this.renderer.add(visual);
       this.world.add(id, new Render('slick', visual));
@@ -1192,6 +1221,25 @@ export class Game {
       if (distance > projectile.aoeRadius) continue;
       const falloff = Math.max(0.25, 1 - distance / projectile.aoeRadius);
       this.applyDamage(carId, projectile.damage * falloff, projectile.ownerId);
+    }
+  }
+
+  /** Старение пятен нефти: полная видимость, затем плавное затухание в альфу. */
+  private updateSlicks(dt: number): void {
+    for (const id of this.world.query(Slick)) {
+      const slick = this.world.get(id, Slick);
+      const render = this.world.get(id, Render);
+      if (!slick) continue;
+      slick.age += dt;
+      if (slick.age >= slick.lifetime + slick.fadeDuration) {
+        this.world.destroyEntity(id);
+        continue;
+      }
+      slick.opacity =
+        slick.age <= slick.lifetime
+          ? 1
+          : Math.max(0, 1 - (slick.age - slick.lifetime) / slick.fadeDuration);
+      if (render?.object) this.renderer.setOpacity(render.object, slick.opacity);
     }
   }
 
@@ -1405,10 +1453,11 @@ export class Game {
     if (!state || !lap || !physics?.body || !health) return;
     const wp = checkpointPosition(this.track, lap.lastCheckpoint);
     const yaw = Math.atan2(wp.tangent.x, wp.tangent.z);
+    const spawn = this.findRespawnPosition(id, wp);
     const body = physics.body;
     if (!this.physics.world.bodies.includes(body)) this.physics.world.addBody(body);
     this.bodyToEntity.set(body, id);
-    body.position.set(wp.position.x, wp.position.y + CHASSIS_REST_Y + 0.2, wp.position.z);
+    body.position.set(spawn.x, spawn.y + CHASSIS_REST_Y + 0.2, spawn.z);
     body.quaternion.setFromEuler(0, yaw, 0);
     body.velocity.set(0, 0, 0);
     body.angularVelocity.set(0, 0, 0);
@@ -1433,6 +1482,54 @@ export class Game {
     state.respawnTimer = 0;
     this.syncCarTransform(id);
     this.particles.burst(body.position.clone(), 'dust', 26, 2.4, 0.6, 0.35);
+  }
+
+  /**
+   * Выбирает точку респауна рядом с чекпоинтом так, чтобы машины не
+   * появлялись друг на друге. Сначала пробуются позиции слева и справа от
+   * центра трассы, затем — со сдвигом вдоль неё.
+   */
+  private findRespawnPosition(id: EntityId, wp: Waypoint): Vec3 {
+    const lateral = RESPAWN.lateralOffset;
+    const along = RESPAWN.longitudinalOffset;
+    const offsets: ReadonlyArray<readonly [number, number]> = [
+      [-lateral, 0],
+      [lateral, 0],
+      [-lateral, -along],
+      [lateral, -along],
+      [-lateral, along],
+      [lateral, along],
+      [0, 0],
+      [0, -along],
+      [0, along],
+    ];
+    let best = wp.position.clone();
+    let bestDistance = -1;
+    for (const [side, forward] of offsets) {
+      const candidate = wp.position.clone().vadd(wp.right.scale(side)).vadd(wp.tangent.scale(forward));
+      const distance = this.minCarDistance(id, candidate);
+      if (distance >= RESPAWN.minSeparation) return candidate;
+      if (distance > bestDistance) {
+        bestDistance = distance;
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  /** Минимальное горизонтальное расстояние от точки до живых машин. */
+  private minCarDistance(id: EntityId, position: Vec3): number {
+    let min = Number.POSITIVE_INFINITY;
+    for (const otherId of this.carIds) {
+      if (otherId === id) continue;
+      const state = this.world.get(otherId, CarState);
+      const physics = this.world.get(otherId, Physics);
+      if (!state || state.phase !== 'alive' || !physics?.body) continue;
+      const dx = physics.body.position.x - position.x;
+      const dz = physics.body.position.z - position.z;
+      min = Math.min(min, Math.hypot(dx, dz));
+    }
+    return min;
   }
 
   /** Полный боезапас — только после смерти/респауна. */

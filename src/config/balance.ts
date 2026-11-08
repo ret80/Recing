@@ -533,6 +533,10 @@ export const WEAPON_TUNING = {
   mineTriggerRadius: 2.6,
   projectileHitRadius: 1.4,
   slickEffectAfterExitSec: 2,
+  /** Сколько секунд пятно нефти полностью видно. */
+  slickLifetimeSec: 20,
+  /** Сколько секунд длится затухание пятна в альфу. */
+  slickFadeSec: 4,
   nitroDuration: 2,
   nitroAccelMult: 1.8,
   nitroSpeedMult: 1.35,
@@ -559,6 +563,12 @@ export const RESPAWN = {
   delaySec: 4,
   invulnSec: 2,
   healthReset: true,
+  /** Боковое смещение точки респауна от центра чекпоинта (м). */
+  lateralOffset: 3.2,
+  /** Продольное смещение запасных точек, если боковые заняты (м). */
+  longitudinalOffset: 5,
+  /** Минимальная дистанция между машинами в точке респауна (м). */
+  minSeparation: 3,
 } as const;
 
 export const STORAGE_KEY = 'rust-and-ruin-profile-v1';
