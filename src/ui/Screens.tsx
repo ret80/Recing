@@ -1,10 +1,11 @@
-import { ZONES } from '../config/balance';
+import { TRACK_LAYOUTS, ZONES } from '../config/balance';
 import type { Game } from '../game/Game';
 import type { AppSnapshot } from '../game/GameStore';
 import { formatLapTime, money } from './format';
 
 export function TrackIntro({ snapshot }: { snapshot: AppSnapshot }) {
   const zone = ZONES.find((entry) => entry.id === snapshot.zoneId);
+  const track = TRACK_LAYOUTS.find((entry) => entry.id === snapshot.track);
   return (
     <div className="ui-screen">
       <div className="intro">
@@ -12,6 +13,10 @@ export function TrackIntro({ snapshot }: { snapshot: AppSnapshot }) {
         <h2>{zone?.name ?? snapshot.zoneName}</h2>
         <p>{zone?.description}</p>
         <div className="boss">БОСС ЗОНЫ: {zone?.boss ?? '—'}</div>
+        <div className="small muted">
+          Трасса: {track?.name ?? snapshot.track}
+          {track && track.elevation > 0 ? ` · перепад высот ${track.elevation} м` : ' · ровное полотно'}
+        </div>
       </div>
     </div>
   );
@@ -56,11 +61,14 @@ export function Results({ game, snapshot }: { game: Game; snapshot: AppSnapshot 
   const rows = snapshot.results ?? [];
   const player = rows.find((row) => row.isPlayer);
   const zone = ZONES.find((entry) => entry.id === snapshot.zoneId);
+  const track = TRACK_LAYOUTS.find((entry) => entry.id === snapshot.track);
 
   return (
     <div className="ui-screen">
       <div className="panel scanlines results">
-        <div className="menu-kicker">{zone?.name ?? snapshot.zoneName}</div>
+        <div className="menu-kicker">
+          {zone?.name ?? snapshot.zoneName} · {track?.name ?? snapshot.track}
+        </div>
         <h2>{snapshot.dnf ? 'Гонка провалена' : player?.place === 1 ? 'Победа!' : 'Финиш'}</h2>
         <div className="small muted">
           {snapshot.dnf
@@ -119,8 +127,8 @@ export function Results({ game, snapshot }: { game: Game; snapshot: AppSnapshot 
         )}
 
         <div className="result-actions">
-          <button className="primary" onClick={() => game.startRace(snapshot.zoneId)}>
-            Следующая гонка
+          <button className="primary" onClick={() => game.nextRace()}>
+            Следующая трасса
           </button>
           <button onClick={() => game.quitToGarage()}>В гараж</button>
           <button className="ghost" onClick={() => game.goToMenu()}>

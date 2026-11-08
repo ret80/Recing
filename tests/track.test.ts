@@ -5,6 +5,7 @@ import {
   buildTrack,
   checkpointPosition,
   isLethalSurface,
+  nextTrackLayout,
   startingGrid,
   surfaceAtHazard,
   waypointAt,
@@ -45,6 +46,11 @@ describe('buildTrack', () => {
       expect(walls.length).toBeGreaterThan(0);
       expect(walls.length).toBeLessThan(buildTrack(zoneId).waypoints.length);
     }
+  });
+
+  it('advances from the flat track to the elevated one and back', () => {
+    expect(nextTrackLayout('flat')).toBe('hills');
+    expect(nextTrackLayout('hills')).toBe('flat');
   });
 
   it('builds the hills layout with real elevation and solid walls', () => {

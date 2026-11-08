@@ -1,6 +1,7 @@
 import { Vec3 } from 'cannon-es';
 import {
   SURFACES,
+  TRACK_LAYOUTS,
   ZONES,
   type SurfaceType,
   type TrackLayout,
@@ -371,6 +372,13 @@ function buildPickups(waypoints: Waypoint[], width: number): PickupSpot[] {
     spots.push({ position, active: true });
   }
   return spots;
+}
+
+/** Следующая конфигурация трассы по кругу: ровная → с перепадами высот. */
+export function nextTrackLayout(current: TrackLayout): TrackLayout {
+  const index = TRACK_LAYOUTS.findIndex((entry) => entry.id === current);
+  const next = TRACK_LAYOUTS[(index + 1) % TRACK_LAYOUTS.length];
+  return next?.id ?? TRACK_LAYOUTS[0]?.id ?? 'flat';
 }
 
 export function buildTrack(zoneId: ZoneId, layout: TrackLayout = 'flat'): TrackDefinition {

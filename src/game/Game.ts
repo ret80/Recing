@@ -52,6 +52,7 @@ import {
   buildTrack,
   checkpointPosition,
   isLethalSurface,
+  nextTrackLayout,
   startingGrid,
   surfaceAtHazard,
   waypointAt,
@@ -231,6 +232,22 @@ export class Game {
     const zone = this.track.zone.id;
     if (this.screen === 'paused') this.actor.send({ type: 'QUIT' });
     this.startRace(zone);
+  }
+
+  /**
+   * «Следующая трасса»: переключает конфигурацию (ровная ↔ с перепадами
+   * высот) и запускает новый заезд в текущей зоне. Так после финиша игрок
+   * попадает на другую трассу, а не едет тот же круг заново.
+   */
+  nextRace(): void {
+    const track = nextTrackLayout(this.profile.track);
+    if (track !== this.profile.track) {
+      this.profile = { ...this.profile, track };
+      saveProfile(this.profile);
+      this.store.setProfile(this.profile);
+    }
+    // Зона могла открыться по итогам сезона — берём актуальную из профиля.
+    this.startRace(this.profile.zone);
   }
 
   private buildRace(zone: ZoneId): void {
