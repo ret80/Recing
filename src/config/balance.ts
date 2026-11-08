@@ -483,16 +483,16 @@ export type TrackLayoutSpec = {
 
 export const TRACK_LAYOUTS: TrackLayoutSpec[] = [
   {
-    id: 'flat',
-    name: 'Соляной Полигон',
-    description: 'Ровное кольцо через ржавые заводы: широкие дуги, длинные прямые и хороший разгон.',
-    elevation: 0,
-  },
-  {
     id: 'hills',
     name: 'Серпантин',
     description: 'Горки и спуски: подъёмы отбирают скорость, а с гребня машина уходит в полёт.',
     elevation: 32,
+  },
+  {
+    id: 'flat',
+    name: 'Соляной Полигон',
+    description: 'Ровное кольцо через ржавые заводы: широкие дуги, длинные прямые и хороший разгон.',
+    elevation: 0,
   },
 ];
 

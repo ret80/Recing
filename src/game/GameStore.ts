@@ -74,7 +74,7 @@ export function createInitialSnapshot(): AppSnapshot {
     screen: 'menu',
     zoneId: 1,
     zoneName: '',
-    track: 'flat',
+    track: 'hills',
     touchControls: false,
     countdown: 0,
     raceTime: 0,

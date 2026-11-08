@@ -11,7 +11,8 @@ import {
 import type { UpgradeState } from '../config/cars';
 
 export type PlayerProfile = {
-  version: 1;
+  /** 2 — порядок трасс: первой идёт «Серпантин» с перепадами высот. */
+  version: 2;
   money: number;
   car: string;
   carsOwned: string[];
@@ -44,7 +45,7 @@ export function emptyUpgrades(): UpgradeState {
 
 export function defaultProfile(): PlayerProfile {
   return {
-    version: 1,
+    version: 2,
     money: ECONOMY.startingMoney,
     car: ECONOMY.startCarId,
     carsOwned: [ECONOMY.startCarId],
@@ -52,7 +53,7 @@ export function defaultProfile(): PlayerProfile {
     pilot: 'badlands',
     points: 0,
     zone: 1,
-    track: 'flat',
+    track: 'hills',
     division: 'rookie',
     seasonLaps: 0,
     seasonFinished: false,
@@ -72,11 +73,14 @@ function sanitizeProfile(raw: unknown): PlayerProfile {
   if (!raw || typeof raw !== 'object') return base;
   const value = raw as Partial<PlayerProfile>;
   const zone = ZONES.some((z) => z.id === value.zone) ? (value.zone as ZoneId) : base.zone;
-  const track = TRACK_LAYOUTS.some((t) => t.id === value.track) ? (value.track as TrackLayout) : base.track;
+  const storedTrack = TRACK_LAYOUTS.some((t) => t.id === value.track) ? (value.track as TrackLayout) : base.track;
+  // Старые профили (version 1) один раз переводим на новый порядок трасс,
+  // где первой идёт «Серпантин». Дальше выбор игрока не трогаем.
+  const track = value.version === 2 ? storedTrack : base.track;
   return {
     ...base,
     ...value,
-    version: 1,
+    version: 2,
     zone,
     track,
     carsOwned: Array.isArray(value.carsOwned) && value.carsOwned.length > 0 ? value.carsOwned : base.carsOwned,

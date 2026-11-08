@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Vec3 } from 'cannon-es';
-import { ZONES, type ZoneId } from '../src/config/balance';
+import { TRACK_LAYOUTS, ZONES, type ZoneId } from '../src/config/balance';
 import {
   buildTrack,
   checkpointPosition,
@@ -48,9 +48,10 @@ describe('buildTrack', () => {
     }
   });
 
-  it('advances from the flat track to the elevated one and back', () => {
-    expect(nextTrackLayout('flat')).toBe('hills');
+  it('starts the rotation with the elevated track', () => {
+    expect(TRACK_LAYOUTS[0]?.id).toBe('hills');
     expect(nextTrackLayout('hills')).toBe('flat');
+    expect(nextTrackLayout('flat')).toBe('hills');
   });
 
   it('builds the hills layout with real elevation and solid walls', () => {
