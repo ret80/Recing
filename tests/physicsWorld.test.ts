@@ -60,6 +60,38 @@ describe('PhysicsWorld', () => {
     physics.dispose();
   });
 
+  it('returns the nearest of several hits along the ray', () => {
+    const physics = new PhysicsWorld();
+    const near = physics.addStaticBox(0, -2, 1, 1, 0.1, 0);
+    physics.addStaticBox(0, 2, 1, 1, 0.1, 0);
+    const hit = physics.raycast(new Vec3(0, 1, -10), new Vec3(0, 1, 10));
+    expect(hit).not.toBeNull();
+    expect(hit?.body).toBe(near);
+    expect(hit?.point.z).toBeCloseTo(-2.1);
+    physics.dispose();
+  });
+
+  it('skips the ignored body and hits the one behind it', () => {
+    const physics = new PhysicsWorld();
+    const near = physics.addStaticBox(0, -2, 1, 1, 0.1, 0);
+    const far = physics.addStaticBox(0, 2, 1, 1, 0.1, 0);
+    const from = new Vec3(0, 1, -10);
+    const to = new Vec3(0, 1, 10);
+    expect(physics.raycast(from, to, null, (body) => body === near)?.body).toBe(far);
+    expect(physics.raycast(from, to, near)?.body).toBe(far);
+    physics.dispose();
+  });
+
+  it('finds a thin static collider in a swept segment instead of tunnelling', () => {
+    const physics = new PhysicsWorld();
+    const fence = physics.addStaticBox(0, 0, 1, 1, 0.05, 0);
+    // Снаряд летит на 12 м за шаг: без свипа он оказался бы за забором.
+    const hit = physics.raycast(new Vec3(0, 1, -6), new Vec3(0, 1, 6));
+    expect(hit?.body).toBe(fence);
+    expect(hit?.point.z).toBeCloseTo(-0.05);
+    physics.dispose();
+  });
+
   it('converts yaw to quaternions and forward vectors consistently', () => {
     const yaw = Math.PI / 2;
     const quaternion = yawQuaternion(yaw);

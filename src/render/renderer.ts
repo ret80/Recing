@@ -27,6 +27,8 @@ export class GameRenderer {
   readonly camera: Camera;
   readonly materials: MaterialCache;
   readonly carWheels = new Map<Transform, Transform[]>();
+  /** Все колёсные узлы (для анимации хода подвески). */
+  readonly carWheelPivots = new Map<Transform, Transform[]>();
   /** Поворотные узлы передних колёс (только у колёсной техники). */
   readonly carSteerPivots = new Map<Transform, Transform[]>();
   private resizeObserver: ResizeObserver | null = null;
@@ -146,6 +148,7 @@ export class GameRenderer {
   createCarVisual(mainColor: number, accentColor: number, chassis: 'wheeled' | 'tracked' | 'hover'): Transform {
     const root = new Transform();
     const wheels: Transform[] = [];
+    const wheelPivots: Transform[] = [];
     const steerPivots: Transform[] = [];
     const dark = 0x1c1c1c;
     const trim = 0x6b6b6b;
@@ -200,12 +203,14 @@ export class GameRenderer {
           pivot.addChild(wheel);
           root.addChild(pivot);
           wheels.push(wheel);
+          wheelPivots.push(pivot);
           if (chassis === 'wheeled' && front === 1) steerPivots.push(pivot);
         }
       }
     }
 
     this.carWheels.set(root, wheels);
+    this.carWheelPivots.set(root, wheelPivots);
     this.carSteerPivots.set(root, steerPivots);
     return root;
   }

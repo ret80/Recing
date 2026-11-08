@@ -6,7 +6,6 @@ import {
   Plane,
   Quaternion,
   Ray,
-  RaycastResult,
   SAPBroadphase,
   Vec3,
   World as CannonWorld,
@@ -170,20 +169,37 @@ export class PhysicsWorld {
     body.interpolatedQuaternion.copy(body.quaternion);
   }
 
-  raycast(from: Vec3, to: Vec3, skipBody: Body | null = null): RaycastHit | null {
+  /**
+   * Ближайшее попадание луча. `skipBody` исключает корпус самой машины,
+   * `ignoreBody` — например, все машины (для лучей подвески, которым нужен
+   * только рельеф и препятствия).
+   */
+  raycast(
+    from: Vec3,
+    to: Vec3,
+    skipBody: Body | null = null,
+    ignoreBody?: (body: Body) => boolean,
+  ): RaycastHit | null {
     const ray = new Ray(from, to);
-    const result = new RaycastResult();
     const options: { collisionFilterMask?: number; skipBackfaces: boolean; collisionFilterGroup: number } = {
       skipBackfaces: true,
       collisionFilterGroup: 1,
     };
-    this.world.raycastClosest(ray.from, ray.to, options, result);
-    if (!result.hasHit || !result.body || result.body === skipBody) return null;
-    return {
-      body: result.body,
-      point: result.hitPointWorld.clone(),
-      distance: from.distanceTo(result.hitPointWorld),
-    };
+    let best: RaycastHit | null = null;
+    this.world.raycastAll(ray.from, ray.to, options, (result) => {
+      if (!result.hasHit || !result.body) return;
+      if (result.body === skipBody) return;
+      if (ignoreBody?.(result.body)) return;
+      const distance = from.distanceTo(result.hitPointWorld);
+      if (!best || distance < best.distance) {
+        best = {
+          body: result.body,
+          point: result.hitPointWorld.clone(),
+          distance,
+        };
+      }
+    });
+    return best;
   }
 
   /** Рэйкаст вниз для поиска высоты поверхности под точкой. */

@@ -3,7 +3,7 @@ import { Quaternion, Vec3 } from 'cannon-es';
 import type { AnyActorRef } from 'xstate';
 import type { ChassisType, SurfaceType } from '../config/balance';
 import type { BoostType, FrontWeaponType, RearWeaponType } from '../config/weapons';
-import type { ComputedStats } from '../config/cars';
+import type { ComputedStats, Drivetrain } from '../config/cars';
 
 export type EntityId = number;
 
@@ -206,6 +206,7 @@ export class CarStats {
   jumpForce: number;
   bounce: number;
   mass: number;
+  drivetrain: Drivetrain;
 
   constructor(stats: ComputedStats) {
     this.acceleration = stats.acceleration;
@@ -214,6 +215,7 @@ export class CarStats {
     this.jumpForce = stats.jumpForce;
     this.bounce = stats.bounce;
     this.mass = stats.mass;
+    this.drivetrain = stats.drivetrain;
   }
 }
 

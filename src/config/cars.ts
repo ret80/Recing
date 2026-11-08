@@ -4,12 +4,15 @@ import { PILOTS, PILOT_MODS, UPGRADE_MODS } from './balance';
 export type FrontWeaponType = 'scrapVulcan' | 'rockets' | 'heatDrones';
 export type RearWeaponType = 'oilSlick' | 'spikeMine' | 'cassette';
 export type BoostType = 'jumpJets' | 'nitro';
+/** Привод: передний, задний или полный. Влияет на распределение тяги по колёсам. */
+export type Drivetrain = 'FWD' | 'RWD' | 'AWD';
 
 export type CarSpec = {
   id: string;
   name: string;
   price: number;
   chassis: ChassisType;
+  drivetrain: Drivetrain;
   mass: number;
   maxSpeed: number;
   acceleration: number;
@@ -29,6 +32,7 @@ export const CARS: CarSpec[] = [
     name: 'Скрап-Багги',
     price: 18000,
     chassis: 'wheeled',
+    drivetrain: 'AWD',
     mass: 900,
     maxSpeed: 28,
     acceleration: 12,
@@ -46,6 +50,7 @@ export const CARS: CarSpec[] = [
     name: 'Ржавый Перехватчик',
     price: 18000,
     chassis: 'wheeled',
+    drivetrain: 'RWD',
     mass: 1400,
     maxSpeed: 34,
     acceleration: 15,
@@ -63,6 +68,7 @@ export const CARS: CarSpec[] = [
     name: 'Аэро-Собиратель',
     price: 70000,
     chassis: 'wheeled',
+    drivetrain: 'AWD',
     mass: 1200,
     maxSpeed: 40,
     acceleration: 17,
@@ -80,6 +86,7 @@ export const CARS: CarSpec[] = [
     name: 'Гусеничный Джаггернаут',
     price: 110000,
     chassis: 'tracked',
+    drivetrain: 'AWD',
     mass: 2500,
     maxSpeed: 26,
     acceleration: 9,
@@ -97,6 +104,7 @@ export const CARS: CarSpec[] = [
     name: 'Ховер-Риг',
     price: 130000,
     chassis: 'hover',
+    drivetrain: 'AWD',
     mass: 1600,
     maxSpeed: 38,
     acceleration: 20,
@@ -127,6 +135,7 @@ export type ComputedStats = {
   bounce: number;
   mass: number;
   maxHealth: number;
+  drivetrain: Drivetrain;
 };
 
 export function pilotMultipliers(pilot: PilotSpec) {
@@ -160,6 +169,7 @@ export function computeStats(car: CarSpec, upgrades: UpgradeState, pilot: PilotS
     bounce: car.bounce * suspBounce,
     mass: car.mass,
     maxHealth: car.health + bodyHp,
+    drivetrain: car.drivetrain,
   };
 }
 

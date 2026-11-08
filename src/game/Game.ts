@@ -77,6 +77,7 @@ import {
   steeringYawRate,
   angleDifference,
 } from './vehicleMath';
+import { createVehicleState, stepVehicle, type VehicleState } from './vehicleController';
 import { tickCooldown, canFire } from './weaponLogic';
 import { getUpgrades, loadProfile, loadSettings, resetProfile, saveProfile, saveSettings, type GameSettings, type PlayerProfile } from './storage';
 import type { GameActor, GameScreen } from './gameMachine';
@@ -107,6 +108,7 @@ export class Game {
   private readonly audio = new AudioSystem();
   private readonly cameraRig: CameraRig;
   private readonly visuals = new Map<EntityId, import('ogl').Transform>();
+  private readonly vehicleStates = new Map<EntityId, VehicleState>();
   private readonly bodyToEntity = new Map<Body, EntityId>();
   private carIds: EntityId[] = [];
   private playerId = -1;
@@ -171,6 +173,7 @@ export class Game {
       if (object) {
         this.renderer.remove(object);
         this.renderer.carWheels.delete(object);
+        this.renderer.carWheelPivots.delete(object);
         this.renderer.carSteerPivots.delete(object);
         this.visuals.delete(id);
       }
@@ -233,6 +236,7 @@ export class Game {
   private buildRace(zone: ZoneId): void {
     for (const id of [...this.world.entities]) this.world.destroyEntity(id);
     this.bodyToEntity.clear();
+    this.vehicleStates.clear();
     this.carIds = [];
     this.playerId = -1;
     this.scene.clear();
@@ -419,12 +423,12 @@ export class Game {
       }
     }
 
-    for (const id of this.carIds) this.updateWheelSteer(id);
     for (const id of this.carIds) this.vehiclePreStep(id, dt);
     this.physics.step(dt);
     for (const id of this.carIds) {
       this.updateGround(id);
       this.vehiclePostStep(id, dt);
+      this.updateWheelVisuals(id);
       this.syncCarTransform(id);
       this.updateSurface(id, dt);
       this.updateRamps(id);
@@ -442,16 +446,30 @@ export class Game {
 
   // ------------------------------------------------------------- car movement
 
-  /** Визуально поворачивает передние колёса в сторону руля. */
-  private updateWheelSteer(id: EntityId): void {
+  /**
+   * Визуально поворачивает передние колёса и опускает/поднимает их
+   * по ходу подвески. Состояние колёс приходит из vehicleController.
+   */
+  private updateWheelVisuals(id: EntityId): void {
     const visual = this.visuals.get(id);
     const input = this.world.get(id, VehicleInput);
     const carState = this.world.get(id, CarState);
-    if (!visual || !input || !carState) return;
-    const pivots = this.renderer.carSteerPivots.get(visual);
-    if (!pivots || pivots.length === 0) return;
-    const angle = carState.phase === 'alive' ? input.steer * PHYSICS.steerVisualAngle : 0;
-    for (const pivot of pivots) pivot.rotation.y = angle;
+    const chassis = this.world.get(id, Chassis);
+    if (!visual || !input || !carState || chassis?.type !== 'wheeled') return;
+    const state = this.vehicleStates.get(id);
+    const steerPivots = this.renderer.carSteerPivots.get(visual);
+    if (steerPivots) {
+      const angle = carState.phase === 'alive' ? state?.steerAngle ?? 0 : 0;
+      for (const pivot of steerPivots) pivot.rotation.y = angle;
+    }
+    const pivots = this.renderer.carWheelPivots.get(visual);
+    if (!pivots || !state) return;
+    for (let index = 0; index < pivots.length; index += 1) {
+      const wheel = state.wheels[index];
+      const pivot = pivots[index];
+      if (!wheel || !pivot) continue;
+      pivot.position.y = PHYSICS.wheels.attachY - wheel.suspensionLength;
+    }
   }
 
   /**
@@ -463,10 +481,11 @@ export class Game {
     const carState = this.world.get(id, CarState);
     const physics = this.world.get(id, Physics);
     const stats = this.world.get(id, CarStats);
+    const chassis = this.world.get(id, Chassis);
     const input = this.world.get(id, VehicleInput);
     const engine = this.world.get(id, EngineState);
     const surface = this.world.get(id, SurfaceState);
-    if (!carState || !physics?.body || !stats || !input || !engine || !surface) return;
+    if (!carState || !physics?.body || !stats || !chassis || !input || !engine || !surface) return;
     if (carState.phase !== 'alive') {
       input.throttle = 0;
       input.brake = 0;
@@ -475,6 +494,37 @@ export class Game {
     }
     const body = physics.body;
     body.wakeUp();
+    const stabilize = Math.exp(-PHYSICS.rollStabilization * dt);
+
+    if (chassis.type === 'wheeled') {
+      const state = this.vehicleStates.get(id) ?? createVehicleState();
+      this.vehicleStates.set(id, state);
+      const spinOut = engine.spinOutTimer > 0;
+      stepVehicle(
+        state,
+        body,
+        this.physics,
+        {
+          throttle: input.throttle,
+          brake: input.brake,
+          steer: input.steer,
+          acceleration: stats.acceleration,
+          maxSpeed: stats.maxSpeed,
+          mass: stats.mass,
+          grip: stats.grip * (spinOut ? 0.25 : 1),
+          surfaceGrip: surface.grip,
+          drivetrain: stats.drivetrain,
+          nitroMult: engine.nitroTimer > 0 ? WEAPON_TUNING.nitroAccelMult : 1,
+          dt,
+        },
+        (candidate) => this.bodyToEntity.has(candidate),
+      );
+      if (spinOut) body.angularVelocity.y = engine.spinOutRate;
+      body.angularVelocity.x *= stabilize;
+      body.angularVelocity.z *= stabilize;
+      return;
+    }
+
     const forward = forwardVector(body.quaternion);
     forward.y = 0;
     if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
@@ -490,7 +540,6 @@ export class Game {
       const blend = 1 - Math.exp(-PHYSICS.steerSmoothing * dt);
       body.angularVelocity.y += (target - body.angularVelocity.y) * blend;
     }
-    const stabilize = Math.exp(-PHYSICS.rollStabilization * dt);
     body.angularVelocity.x *= stabilize;
     body.angularVelocity.z *= stabilize;
   }
@@ -524,6 +573,29 @@ export class Game {
     forward.y = 0;
     if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
     forward.normalize();
+
+    if (chassis.type === 'wheeled') {
+      const forwardSpeed = body.velocity.dot(forward);
+      const nitroActive = engine.nitroTimer > 0;
+      const speedMult = nitroActive ? WEAPON_TUNING.nitroSpeedMult : 1;
+      const maxForward = stats.maxSpeed * speedMult;
+      if (forwardSpeed > maxForward) body.velocity.addScaledVector(maxForward - forwardSpeed, forward);
+      const minForward = -stats.maxSpeed * PHYSICS.maxReverseFactor;
+      if (forwardSpeed < minForward) body.velocity.addScaledVector(minForward - forwardSpeed, forward);
+      if (surface.drag > 0) {
+        const dragFactor = Math.exp(-surface.drag * PHYSICS.dragRate * dt);
+        body.velocity.x *= dragFactor;
+        body.velocity.z *= dragFactor;
+      }
+      if (input.throttle <= 0 && input.brake <= 0 && Math.abs(forwardSpeed) < PHYSICS.wheels.stopSpeed) {
+        body.velocity.x *= 0.85;
+        body.velocity.z *= 0.85;
+      }
+      body.velocity.y = Math.max(-PHYSICS.maxVerticalSpeed, Math.min(PHYSICS.maxVerticalSpeed, body.velocity.y));
+      this.alignToGround(id, dt);
+      return;
+    }
+
     const right = rightVector(body.quaternion);
     right.y = 0;
     if (right.lengthSquared() < 1e-6) right.set(1, 0, 0);
@@ -1026,7 +1098,31 @@ export class Game {
         continue;
       }
       if (projectile.homing) this.homeProjectile(projectile, physics, transform.position);
-      transform.position.vadd(physics.velocity.scale(dt), transform.position);
+      const previous = transform.position.clone();
+      const next = previous.clone().vadd(physics.velocity.scale(dt));
+
+      // Свип-луч из прошлой позиции в новую: быстрый снаряд не проскакивает
+      // сквозь заборы, столбы и другие статические коллайдеры за один кадр.
+      const ownerBody = this.world.get(projectile.ownerId, Physics)?.body ?? null;
+      const sweep = this.physics.raycast(previous, next, ownerBody);
+      if (sweep) {
+        const hitCarId = sweep.body ? this.bodyToEntity.get(sweep.body) : undefined;
+        const impact = sweep.point.clone();
+        if (hitCarId !== undefined && hitCarId !== projectile.ownerId) {
+          if (projectile.aoeRadius > 0) this.applyAoe(projectile, impact);
+          else this.applyDamage(hitCarId, projectile.damage, projectile.ownerId);
+        }
+        if (projectile.aoeRadius > 0) {
+          if (hitCarId === undefined) this.applyAoe(projectile, impact);
+        } else {
+          this.particles.burst(impact, 'fire', 10, 2.2, 0.35, 0.2);
+          this.particles.burst(impact, 'spark', 16, 3.5, 0.35, 0.16);
+        }
+        this.world.destroyEntity(id);
+        continue;
+      }
+
+      transform.position.copy(next);
       if (transform.position.y < WORLD.killPlaneY) {
         this.world.destroyEntity(id);
         continue;
