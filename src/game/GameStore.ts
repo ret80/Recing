@@ -67,6 +67,17 @@ export type AppSnapshot = {
   dnf: boolean;
   paused: boolean;
   fps: number;
+  /** Открыт ли отладочный оверлей (?debug). */
+  debug: boolean;
+  /** Настройки отладочных сеток трассы. */
+  debugGrid: DebugGridState;
+};
+
+export type DebugGridState = {
+  road: boolean;
+  roadColor: number;
+  terrain: boolean;
+  terrainColor: number;
 };
 
 export function createInitialSnapshot(): AppSnapshot {
@@ -106,6 +117,8 @@ export function createInitialSnapshot(): AppSnapshot {
     dnf: false,
     paused: false,
     fps: 60,
+    debug: false,
+    debugGrid: { road: false, roadColor: 0x42ff5a, terrain: false, terrainColor: 0x59c8ff },
   };
 }
 

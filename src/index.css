@@ -1613,3 +1613,59 @@ input[type='checkbox'] {
     top: 46%;
   }
 }
+
+/* Отладочный оверлей (?debug): сетки полотна и рельефа. */
+.debug-panel {
+  position: fixed;
+  top: 96px;
+  left: 12px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--sand);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  pointer-events: auto;
+  backdrop-filter: blur(6px);
+}
+
+.debug-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--rust-bright);
+}
+
+.debug-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.debug-row span {
+  flex: 1;
+}
+
+.debug-row input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--rust);
+  cursor: pointer;
+}
+
+.debug-row input[type='color'] {
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}

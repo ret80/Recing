@@ -52,6 +52,26 @@ void main() {
 }
 `;
 
+const lineVertex = /* glsl */ `
+precision highp float;
+attribute vec3 position;
+uniform mat4 projectionMatrix;
+uniform mat4 viewMatrix;
+uniform mat4 modelMatrix;
+void main() {
+  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+}
+`;
+
+const lineFragment = /* glsl */ `
+precision highp float;
+uniform vec3 uColor;
+uniform float uOpacity;
+void main() {
+  gl_FragColor = vec4(uColor, uOpacity);
+}
+`;
+
 export type LitOptions = {
   emissive?: number;
   opacity?: number;
@@ -109,6 +129,27 @@ export class MaterialCache {
   /** Уникальная программа не переиспользуется и её можно освободить при удалении меша. */
   isUnique(program: Program): boolean {
     return this.uniquePrograms.has(program);
+  }
+
+  /**
+   * Немигающая линия для отладочных сеток: цвет и прозрачность — uniform'ы,
+   * поэтому одну и ту же геометрию можно перекрашивать без пересборки.
+   */
+  lines(color: number, opacity = 1): Program {
+    const c = new Color(color);
+    const program = new Program(this.gl, {
+      vertex: lineVertex,
+      fragment: lineFragment,
+      transparent: true,
+      depthWrite: false,
+      cullFace: false,
+      uniforms: {
+        uColor: { value: new Float32Array([c.r, c.g, c.b]) },
+        uOpacity: { value: opacity },
+      },
+    });
+    this.uniquePrograms.add(program);
+    return program;
   }
 
   lit(color: number, options: LitOptions = {}): Program {

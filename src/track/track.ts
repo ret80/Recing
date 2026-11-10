@@ -8,6 +8,7 @@ import {
   type ZoneId,
   type ZoneSpec,
 } from '../config/balance';
+import { buildTerrain, pickBridge, type TrackBridge, type TrackTerrain } from './terrain';
 
 export type Waypoint = {
   index: number;
@@ -57,6 +58,10 @@ export type TrackDefinition = {
   elevation: number;
   /** Есть ли сплошная земля под трассой (иначе — обрыв в бездну). */
   solidGround: boolean;
+  /** Ландшафт вокруг горной трассы (null — ровная земля или пропасть). */
+  terrain: TrackTerrain | null;
+  /** Участок полотна, проходящий по мосту над ущельем. */
+  bridge: TrackBridge | null;
   checkpoints: number[];
   hazards: HazardZone[];
   boostPads: BoostPad[];
@@ -547,6 +552,11 @@ export function buildTrack(zoneId: ZoneId, layout: TrackLayout = 'flat'): TrackD
   const ramps = buildRamps(zone, waypoints, layout);
   const pickups = buildPickups(waypoints, zone.width);
 
+  // Горная трасса лежит на собственном рельефе: земля строится вокруг
+  // полотна, а на самом высоком участке перекинут мост через ущелье.
+  const bridge = layout === 'hills' ? pickBridge(waypoints) : null;
+  const terrain = layout === 'hills' ? buildTerrain(waypoints, zone.width, bridge) : null;
+
   return {
     zone,
     layout,
@@ -555,6 +565,8 @@ export function buildTrack(zoneId: ZoneId, layout: TrackLayout = 'flat'): TrackD
     length,
     elevation: Number.isFinite(minY) && Number.isFinite(maxY) ? maxY - minY : 0,
     solidGround: layout === 'flat' && !zone.hasCliffs,
+    terrain,
+    bridge,
     checkpoints,
     hazards,
     boostPads,

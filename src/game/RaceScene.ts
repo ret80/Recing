@@ -1,9 +1,10 @@
 import { Vec3 } from 'cannon-es';
-import { Transform } from 'ogl';
+import { Mesh, Transform } from 'ogl';
 import { SURFACES, ZONES, type ZoneSpec } from '../config/balance';
 import { PhysicsWorld } from '../physics/physicsWorld';
 import { buildTrackColliders } from '../physics/trackCollision';
 import { GameRenderer, type ProfilePoint } from '../render/renderer';
+import { terrainHeightAt } from '../track/terrain';
 import {
   surfaceNormalFromTangent,
   surfaceQuaternionFromTangent,
@@ -16,6 +17,8 @@ const COLORS = {
   wall: 0x4a3b2f,
   wallSnow: 0xdfe9f2,
   gate: 0xffb347,
+  bridge: 0x6f6257,
+  bridgeDeck: 0x4b4239,
   finish: 0xffe066,
   boost: 0x2fd2ff,
   ramp: 0x7a5a3a,
@@ -40,6 +43,8 @@ const TRACK_GEOMETRY = {
   shoulderDrop: 0.8,
   /** Высота «юбки»-обрыва под обочиной (м). */
   shoulderSkirt: 8,
+  /** На рельефной трассе земля подходит вплотную: длинная юбка не нужна. */
+  shoulderSkirtTerrain: 2.8,
   /** Прогиб земли под ровным полотном (м). */
   solidGroundDrop: 0.28,
   /** Ширина площадки под обочиной для физики (м). */
@@ -49,6 +54,14 @@ const TRACK_GEOMETRY = {
   /** Шаг физических секций стен: визуальный меш сплошной, физика дешевле. */
   wallPhysicsStep: 2,
 } as const;
+
+/** Затемнение цвета для рельефа: земля не сливается с полотном. */
+function shadeHex(color: number, factor: number): number {
+  const r = Math.min(255, Math.round(((color >> 16) & 0xff) * factor));
+  const g = Math.min(255, Math.round(((color >> 8) & 0xff) * factor));
+  const b = Math.min(255, Math.round((color & 0xff) * factor));
+  return (r << 16) | (g << 8) | b;
+}
 
 function yawOf(wp: Waypoint): number {
   return Math.atan2(wp.tangent.x, wp.tangent.z);
@@ -66,8 +79,18 @@ function seeded(seed: number): () => number {
 type WallRun = { indices: number[]; closed: boolean };
 
 /** Строит статическую геометрию и физику трассы. */
+export type DebugGridOptions = {
+  road: boolean;
+  roadColor: number;
+  terrain: boolean;
+  terrainColor: number;
+};
+
 export class RaceScene {
   private objects: Transform[] = [];
+  private debugRoad: Mesh | null = null;
+  private debugTerrain: Mesh | null = null;
+  private debugOptions: DebugGridOptions = { road: false, roadColor: 0x42ff5a, terrain: false, terrainColor: 0x59c8ff };
   private readonly renderer: GameRenderer;
   private readonly physics: PhysicsWorld;
 
@@ -79,6 +102,22 @@ export class RaceScene {
   clear(): void {
     for (const object of this.objects) this.renderer.remove(object);
     this.objects = [];
+    this.debugRoad = null;
+    this.debugTerrain = null;
+  }
+
+  /** Включает и перекрашивает отладочные сетки полотна и рельефа. */
+  setDebugGrid(options: Partial<DebugGridOptions>): void {
+    this.debugOptions = { ...this.debugOptions, ...options };
+    const { road, roadColor, terrain, terrainColor } = this.debugOptions;
+    if (this.debugRoad) {
+      this.debugRoad.visible = road;
+      this.renderer.setLineColor(this.debugRoad, roadColor);
+    }
+    if (this.debugTerrain) {
+      this.debugTerrain.visible = terrain;
+      this.renderer.setLineColor(this.debugTerrain, terrainColor);
+    }
   }
 
   private addObject<T extends Transform>(object: T): T {
@@ -91,13 +130,17 @@ export class RaceScene {
     const zone = track.zone;
     this.buildLighting(zone);
     this.buildGround(zone, track);
+    this.buildTerrain(track);
     this.buildRoad(track);
+    this.buildBridge(track);
     this.buildWalls(track);
     this.buildHazards(track);
     this.buildBoostPads(track);
     this.buildRamps(track);
     this.buildCheckpoints(track);
     this.buildScenery(zone, track);
+    this.buildDebugGrids(track);
+    this.setDebugGrid({});
   }
 
   private buildLighting(zone: ZoneSpec): void {
@@ -122,11 +165,146 @@ export class RaceScene {
       this.physics.addGroundPlane(-TRACK_GEOMETRY.solidGroundDrop);
       return;
     }
+    // У горной трассы землю строит собственный рельеф (buildTerrain).
+    if (track.terrain) return;
     // Бездонная пропасть: визуальная «подложка» далеко внизу. Рядом с
     // полотном землю строят обочины (buildRoad), а не бесконечная плоскость.
     const abyss = this.renderer.plane(4000, 4000, 0x1a1110);
     abyss.position.set(0, -60, 0);
     this.addObject(abyss);
+  }
+
+  /** Рельеф горной трассы: склоны вокруг полотна и ущелье под мостом. */
+  private buildTerrain(track: TrackDefinition): void {
+    const terrain = track.terrain;
+    if (!terrain) return;
+    this.addObject(this.renderer.createTerrainMesh(terrain, shadeHex(track.zone.palette.ground, 0.58)));
+    // Страховка: если машина всё же покинет полотно, она упадёт на дно.
+    this.physics.addGroundPlane(terrain.baseY - 0.5);
+  }
+
+  /**
+   * Мост над ущельем: балка под полотном, поперечины и опоры до земли.
+   * Отбойники по краям уже стоят на всём кольце и читаются как перила.
+   */
+  private buildBridge(track: TrackDefinition): void {
+    const bridge = track.bridge;
+    if (!bridge || bridge.indices.length < 4) return;
+    const points = bridge.indices
+      .map((index) => track.waypoints[index])
+      .filter((wp): wp is Waypoint => Boolean(wp));
+    if (points.length < 4) return;
+
+    const half = track.width / 2;
+    const beam: ProfilePoint[] = [
+      { offset: -half - 1.4, y: -0.1 },
+      { offset: half + 1.4, y: -0.1 },
+      { offset: half + 1.4, y: -2.4 },
+      { offset: -half - 1.4, y: -2.4 },
+    ];
+    this.addObject(
+      this.renderer.createProfileSweep(points, beam, COLORS.bridge, { closedProfile: true, closedLoop: false }),
+    );
+
+    const terrain = track.terrain;
+    for (let i = 0; i < points.length; i += 4) {
+      const wp = points[i] as Waypoint;
+      const yaw = Math.atan2(wp.tangent.x, wp.tangent.z);
+      const cross = this.renderer.box(track.width + 3.6, 0.5, 1.2, COLORS.bridgeDeck);
+      cross.position.set(wp.position.x, wp.position.y - 2.55, wp.position.z);
+      cross.rotation.y = yaw;
+      this.addObject(cross);
+    }
+
+    for (let i = 2; i < points.length; i += 6) {
+      const wp = points[i] as Waypoint;
+      const top = wp.position.y - 2.4;
+      const groundY = terrain
+        ? terrainHeightAt(terrain, wp.position.x, wp.position.z)
+        : wp.position.y - 24;
+      const height = Math.max(1.5, top - groundY);
+      const yaw = Math.atan2(wp.tangent.x, wp.tangent.z);
+      for (const side of [-1, 1]) {
+        const pos = wp.position.clone().vadd(wp.right.scale(side * (half + 0.9)));
+        const pillar = this.renderer.box(1.9, height, 1.9, COLORS.bridge);
+        pillar.position.set(pos.x, groundY + height / 2, pos.z);
+        pillar.rotation.y = yaw;
+        this.addObject(pillar);
+      }
+    }
+  }
+
+  /** Отладочные сетки: изолинии полотна и рельефа, выключены по умолчанию. */
+  private buildDebugGrids(track: TrackDefinition): void {
+    const half = track.width / 2;
+    const count = track.waypoints.length;
+    const lift = 0.16;
+    const lanes = 4;
+    const grid: number[] = [];
+    for (let lane = 0; lane <= lanes; lane += 1) {
+      const offset = -half + (track.width * lane) / lanes;
+      for (let i = 0; i <= count; i += 1) {
+        const wp = track.waypoints[i % count] as Waypoint;
+        const next = track.waypoints[(i + 1) % count] as Waypoint;
+        grid.push(
+          wp.position.x + wp.right.x * offset,
+          wp.position.y + lift,
+          wp.position.z + wp.right.z * offset,
+          next.position.x + next.right.x * offset,
+          next.position.y + lift,
+          next.position.z + next.right.z * offset,
+        );
+      }
+    }
+    for (let i = 0; i < count; i += 8) {
+      const wp = track.waypoints[i] as Waypoint;
+      grid.push(
+        wp.position.x - wp.right.x * half,
+        wp.position.y + lift,
+        wp.position.z - wp.right.z * half,
+        wp.position.x + wp.right.x * half,
+        wp.position.y + lift,
+        wp.position.z + wp.right.z * half,
+      );
+    }
+    this.debugRoad = this.renderer.createLineMesh(new Float32Array(grid), this.debugOptions.roadColor);
+    this.addObject(this.debugRoad);
+
+    const terrain = track.terrain;
+    if (!terrain) return;
+    const row = terrain.cells + 1;
+    const stride = 6;
+    const marks: number[] = [];
+    const yAt = (ix: number, iz: number): number => (terrain.heights[iz * row + ix] as number) + 0.2;
+    for (let iz = 0; iz < row; iz += stride) {
+      for (let ix = 0; ix < terrain.cells; ix += 1) {
+        marks.push(
+          terrain.minX + ix * terrain.cellSize,
+          yAt(ix, iz),
+          terrain.minZ + iz * terrain.cellSize,
+          terrain.minX + (ix + 1) * terrain.cellSize,
+          yAt(ix + 1, iz),
+          terrain.minZ + iz * terrain.cellSize,
+        );
+      }
+    }
+    for (let ix = 0; ix < row; ix += stride) {
+      for (let iz = 0; iz < terrain.cells; iz += 1) {
+        marks.push(
+          terrain.minX + ix * terrain.cellSize,
+          yAt(ix, iz),
+          terrain.minZ + iz * terrain.cellSize,
+          terrain.minX + ix * terrain.cellSize,
+          yAt(ix, iz + 1),
+          terrain.minZ + (iz + 1) * terrain.cellSize,
+        );
+      }
+    }
+    this.debugTerrain = this.renderer.createLineMesh(
+      new Float32Array(marks),
+      this.debugOptions.terrainColor,
+    );
+    this.addObject(this.debugTerrain);
   }
 
   private buildRoad(track: TrackDefinition): void {
@@ -137,8 +315,11 @@ export class RaceScene {
     if (!track.solidGround) {
       // Обочина начинается ровно у кромки асфальта — без наложения лент,
       // которое раньше давало «землю поверх трассы» на поворотах.
+      const skirt = track.terrain
+        ? -TRACK_GEOMETRY.shoulderSkirtTerrain
+        : -TRACK_GEOMETRY.shoulderSkirt;
       const left: ProfilePoint[] = [
-        { offset: -(half + TRACK_GEOMETRY.shoulderWidth), y: -TRACK_GEOMETRY.shoulderSkirt },
+        { offset: -(half + TRACK_GEOMETRY.shoulderWidth), y: skirt },
         { offset: -(half + TRACK_GEOMETRY.shoulderWidth), y: -TRACK_GEOMETRY.shoulderDrop },
         { offset: -(half + 0.9), y: -0.3 },
         { offset: -half, y: -0.1 },
@@ -147,7 +328,7 @@ export class RaceScene {
         { offset: half, y: -0.1 },
         { offset: half + 0.9, y: -0.3 },
         { offset: half + TRACK_GEOMETRY.shoulderWidth, y: -TRACK_GEOMETRY.shoulderDrop },
-        { offset: half + TRACK_GEOMETRY.shoulderWidth, y: -TRACK_GEOMETRY.shoulderSkirt },
+        { offset: half + TRACK_GEOMETRY.shoulderWidth, y: skirt },
       ];
       const color = track.zone.palette.ground;
       this.addObject(
@@ -361,7 +542,10 @@ export class RaceScene {
       const color = random() > 0.6 ? zone.palette.accent : zone.palette.ground;
       const pile = this.renderer.box(width, height, depth, color);
       const pileYaw = random() * Math.PI;
-      const baseY = pos.y - 1.2;
+      // На рельефной трассе мусор стоит на земле, а не висит в воздухе.
+      const baseY = track.terrain
+        ? terrainHeightAt(track.terrain, pos.x, pos.z) - 0.4
+        : pos.y - 1.2;
       pile.position.set(pos.x, baseY + height / 2, pos.z);
       pile.rotation.y = pileYaw;
       this.addObject(pile);

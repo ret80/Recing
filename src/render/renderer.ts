@@ -13,6 +13,7 @@ import {
   type OGLRenderingContext,
 } from 'ogl';
 import { CAMERA, RENDER } from '../config/balance';
+import type { TrackTerrain } from '../track/terrain';
 import { MaterialCache, type LightUniforms, type LitOptions } from './materials';
 
 export type Vec3Like = { x: number; y: number; z: number };
@@ -409,6 +410,66 @@ export class GameRenderer {
     const mesh = new Mesh(this.gl, { geometry, program: this.materials.lit(color) });
     mesh.frustumCulled = false;
     return mesh;
+  }
+
+  /** Рельеф вокруг горной трассы: сетка высот, натянутая на поле. */
+  createTerrainMesh(terrain: TrackTerrain, color: number): Mesh {
+    const row = terrain.cells + 1;
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const indices: number[] = [];
+    const step = terrain.cellSize;
+    const h = (ix: number, iz: number): number =>
+      terrain.heights[Math.max(0, Math.min(row - 1, iz)) * row + Math.max(0, Math.min(row - 1, ix))] as number;
+
+    for (let iz = 0; iz < row; iz += 1) {
+      for (let ix = 0; ix < row; ix += 1) {
+        positions.push(terrain.minX + ix * step, h(ix, iz), terrain.minZ + iz * step);
+        // Нормаль по центральным разностям — рельеф выглядит освещённым.
+        const nx = (h(ix - 1, iz) - h(ix + 1, iz)) / (2 * step);
+        const nz = (h(ix, iz - 1) - h(ix, iz + 1)) / (2 * step);
+        const length = Math.hypot(nx, 1, nz);
+        normals.push(nx / length, 1 / length, nz / length);
+      }
+    }
+    for (let iz = 0; iz < terrain.cells; iz += 1) {
+      for (let ix = 0; ix < terrain.cells; ix += 1) {
+        const a = iz * row + ix;
+        const b = a + 1;
+        const c = a + row;
+        const d = c + 1;
+        indices.push(a, c, b, b, c, d);
+      }
+    }
+
+    const geometry = new Geometry(this.gl, {
+      position: { size: 3, data: new Float32Array(positions) },
+      normal: { size: 3, data: new Float32Array(normals) },
+      index: { data: new Uint16Array(indices) },
+    });
+    const mesh = new Mesh(this.gl, { geometry, program: this.materials.lit(color) });
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+
+  /** Линии для отладочных сеток (GL_LINES). */
+  createLineMesh(positions: Float32Array, color: number): Mesh {
+    const geometry = new Geometry(this.gl, { position: { size: 3, data: positions } });
+    const mesh = new Mesh(this.gl, {
+      geometry,
+      program: this.materials.lines(color),
+      mode: this.gl.LINES,
+    });
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+
+  /** Перекраска отладочной сетки без пересборки геометрии. */
+  setLineColor(mesh: Mesh, color: number): void {
+    const uniform = mesh.program.uniforms.uColor;
+    if (!uniform) return;
+    const c = new Color(color);
+    uniform.value = new Float32Array([c.r, c.g, c.b]);
   }
 
   createSkyBox(color: number): Mesh {

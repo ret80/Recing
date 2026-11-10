@@ -10,6 +10,9 @@ import {
   surfaceAtHazard,
   waypointAt,
 } from '../src/track/track';
+import { terrainHeightAt } from '../src/track/terrain';
+
+const waypointsAt = (track: ReturnType<typeof buildTrack>) => track.waypoints;
 
 const ZONE_IDS: ZoneId[] = [1, 2, 3, 4, 5, 6];
 
@@ -66,6 +69,39 @@ describe('buildTrack', () => {
     expect(hills.waypoints.some((wp) => wp.position.y < -5)).toBe(true);
     expect(hills.ramps.length).toBeGreaterThan(0);
     expect(hills.boostPads.length).toBeGreaterThan(0);
+  });
+
+  it('surrounds the hills layout with terrain and hangs a bridge over a ravine', () => {
+    expect(buildTrack(1, 'flat').terrain).toBeNull();
+    expect(buildTrack(1, 'flat').bridge).toBeNull();
+
+    const hills = buildTrack(1, 'hills');
+    const terrain = hills.terrain;
+    expect(terrain).not.toBeNull();
+    if (!terrain) return;
+    expect(terrain.heights).toHaveLength((terrain.cells + 1) ** 2);
+    expect(terrain.cells).toBeGreaterThan(32);
+    expect(terrain.heights.every((value) => Number.isFinite(value))).toBe(true);
+
+    // Земля под полотном ниже дороги и не улетает ниже дна поля.
+    const waypoint = waypointsAt(hills).find((wp) => wp.index === 40);
+    if (!waypoint) throw new Error('no waypoint');
+    const underRoad = terrainHeightAt(terrain, waypoint.position.x, waypoint.position.z);
+    expect(underRoad).toBeLessThan(waypoint.position.y);
+    expect(underRoad).toBeGreaterThanOrEqual(terrain.baseY - 0.01);
+
+    // Мост стоит на самом высоком участке, а под ним — ущелье.
+    const bridge = hills.bridge;
+    expect(bridge).not.toBeNull();
+    if (!bridge) return;
+    expect(bridge.indices.length).toBeGreaterThan(4);
+    const middle = waypointsAt(hills)[bridge.indices[Math.floor(bridge.indices.length / 2)] as number];
+    if (!middle) throw new Error('no bridge middle');
+    const others = waypointsAt(hills).filter((wp) => !bridge.indices.includes(wp.index));
+    const tallestOther = Math.max(...others.map((wp) => wp.position.y));
+    expect(middle.position.y).toBeGreaterThan(tallestOther - 0.5);
+    const gorge = terrainHeightAt(terrain, middle.position.x, middle.position.z);
+    expect(middle.position.y - gorge).toBeGreaterThan(10);
   });
 
   it('adds hazards, boost pads and ramps by zone', () => {

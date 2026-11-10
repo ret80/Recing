@@ -65,7 +65,7 @@ import { GameStore, type HudCar, type RaceResultRow } from './GameStore';
 import { InputSystem, type TouchState } from './InputSystem';
 import { AudioSystem } from './AudioSystem';
 import { CameraRig } from './CameraRig';
-import { RaceScene } from './RaceScene';
+import { RaceScene, type DebugGridOptions } from './RaceScene';
 import { spawnCar } from './CarFactory';
 import { advanceLap, raceProgress } from './lapLogic';
 import { applySeasonProgress, buyCar, buyUpgrade, placementReward, raceMoney } from './economy';
@@ -133,6 +133,9 @@ export class Game {
   private dnf = false;
   private disposed = false;
   private fps = 60;
+  /** Отладочный режим включается только через ?debug в адресе страницы. */
+  private readonly debug = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug');
+  private debugGrid: DebugGridOptions = { road: false, roadColor: 0x42ff5a, terrain: false, terrainColor: 0x59c8ff };
   private frameAccum = 0;
   private frameCount = 0;
   private lastPlayerPosition = 4;
@@ -190,6 +193,8 @@ export class Game {
       money: this.profile.money,
       settings: this.settings,
       touchControls: isTouchCapable(),
+      debug: this.debug,
+      debugGrid: this.debugGrid,
     });
     this.buildRace(this.profile.zone);
     this.syncHud();
@@ -265,6 +270,7 @@ export class Game {
     this.track = buildTrack(zone, this.profile.track);
     this.scene = new RaceScene(this.renderer, this.physics);
     this.scene.build(this.track);
+    this.scene.setDebugGrid(this.debugGrid);
 
     this.finishOrder = [];
     this.firstFinishTime = null;
@@ -2163,6 +2169,13 @@ export class Game {
 
   setTouchInput(patch: Partial<TouchState>): void {
     this.input.setTouch(patch);
+  }
+
+  /** Отладочный оверлей: включение и цвет сеток полотна и рельефа. */
+  setDebugGrid(patch: Partial<DebugGridOptions>): void {
+    this.debugGrid = { ...this.debugGrid, ...patch };
+    this.scene.setDebugGrid(patch);
+    this.store.set({ debugGrid: { ...this.debugGrid } });
   }
 
   setBinding(action: import('./InputSystem').InputAction, codes: string[]): void {
