@@ -1,4 +1,4 @@
-import { Vec3 } from 'cannon-es';
+import { Quaternion, Vec3 } from 'cannon-es';
 import {
   SURFACES,
   TRACK_LAYOUTS,
@@ -24,6 +24,8 @@ export type Waypoint = {
 export type HazardZone = {
   surface: SurfaceType;
   center: Vec3;
+  /** Направление трассы в точке: по нему наклоняется пятно на уклоне. */
+  tangent: Vec3;
   radius: number;
 };
 
@@ -215,6 +217,84 @@ function sampleCenterline(points: ControlPoint[]): ControlPoint[] {
   return out;
 }
 
+/**
+ * Ограничивает минимальный радиус поворота осевой линии.
+ *
+ * Полотно шириной W не может повернуть с радиусом меньше W: внутренняя
+ * кромка в таком месте разворачивается назад, лента дороги складывается
+ * сама на себя, и асфальт «уходит под землю». Локальное усреднение
+ * соседних точек округляет только слишком острые изломы, остальную
+ * геометрию трассы не трогает.
+ */
+function relaxCenterline(points: ControlPoint[], width: number): ControlPoint[] {
+  const minRadius = width;
+  const count = points.length;
+  let current = points.map((point) => ({ ...point }));
+  for (let iteration = 0; iteration < 120; iteration += 1) {
+    let changed = false;
+    const next = current.map((point) => ({ ...point }));
+    for (let i = 0; i < count; i += 1) {
+      const a = current[(i - 1 + count) % count] as ControlPoint;
+      const b = current[i] as ControlPoint;
+      const c = current[(i + 1) % count] as ControlPoint;
+      const ab = Math.hypot(b.x - a.x, b.z - a.z);
+      const bc = Math.hypot(c.x - b.x, c.z - b.z);
+      const ca = Math.hypot(a.x - c.x, a.z - c.z);
+      const twiceArea = Math.abs((b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x));
+      if (twiceArea < 1e-5 || ab < 1e-4 || bc < 1e-4 || ca < 1e-4) continue;
+      const radius = (ab * bc * ca) / (2 * twiceArea);
+      if (radius >= minRadius) continue;
+      const strength = Math.min(0.4, (minRadius - radius) / minRadius + 0.05);
+      next[i] = {
+        x: b.x + ((a.x + c.x) / 2 - b.x) * strength,
+        z: b.z + ((a.z + c.z) / 2 - b.z) * strength,
+        y: b.y,
+      };
+      changed = true;
+    }
+    current = next;
+    if (!changed) break;
+  }
+  return current;
+}
+
+/** Пересэмплирует замкнутый контур с равномерным шагом по длине дуги. */
+function resampleCenterline(points: ControlPoint[], spacing: number): ControlPoint[] {
+  const count = points.length;
+  if (count < 3) return points;
+  let total = 0;
+  for (let i = 0; i < count; i += 1) {
+    const a = points[i] as ControlPoint;
+    const b = points[(i + 1) % count] as ControlPoint;
+    total += Math.hypot(b.x - a.x, b.z - a.z);
+  }
+  const steps = Math.max(count, Math.round(total / spacing));
+  const step = total / steps;
+  const result: ControlPoint[] = [];
+  let segment = 0;
+  let segmentStart = points[0] as ControlPoint;
+  let segmentEnd = points[1 % count] as ControlPoint;
+  let segmentLength = Math.hypot(segmentEnd.x - segmentStart.x, segmentEnd.z - segmentStart.z);
+  let walked = 0;
+  for (let i = 0; i < steps; i += 1) {
+    const target = i * step;
+    while (walked + segmentLength < target && segment < count - 1) {
+      walked += segmentLength;
+      segment += 1;
+      segmentStart = points[segment] as ControlPoint;
+      segmentEnd = points[(segment + 1) % count] as ControlPoint;
+      segmentLength = Math.hypot(segmentEnd.x - segmentStart.x, segmentEnd.z - segmentStart.z);
+    }
+    const t = segmentLength > 1e-5 ? Math.min(1, (target - walked) / segmentLength) : 0;
+    result.push({
+      x: segmentStart.x + (segmentEnd.x - segmentStart.x) * t,
+      z: segmentStart.z + (segmentEnd.z - segmentStart.z) * t,
+      y: (segmentStart.y ?? 0) + ((segmentEnd.y ?? 0) - (segmentStart.y ?? 0)) * t,
+    });
+  }
+  return result;
+}
+
 function computeWaypoints(points: ControlPoint[], width: number, hasWalls: boolean): Waypoint[] {
   const count = points.length;
   const waypoints: Waypoint[] = [];
@@ -253,7 +333,9 @@ function computeWaypoints(points: ControlPoint[], width: number, hasWalls: boole
       const prev = waypoints[(i - 1 + waypoints.length) % waypoints.length] as Waypoint;
       const current = waypoints[i] as Waypoint;
       const next = waypoints[(i + 1) % waypoints.length] as Waypoint;
-      const ds = Math.max(0.5, current.position.distanceTo(next.position));
+      // Тангенсы соседних точек различаются на всём участке prev..next,
+      // поэтому делить нужно на его длину, а не на один сегмент.
+      const ds = Math.max(0.5, prev.position.distanceTo(next.position));
       // Кривизна считается по горизонтальной проекции: уклон не должен
       // заставлять ИИ тормозить перед каждым подъёмом.
       const prevH = Math.hypot(prev.tangent.x, prev.tangent.z) || 1;
@@ -288,41 +370,86 @@ function buildHazards(zone: ZoneSpec, waypoints: Waypoint[]): HazardZone[] {
   if (zone.id === 2) {
     for (const f of [0.14, 0.43, 0.72]) {
       const wp = at(f);
-      hazards.push({ surface: 'sludge', center: wp.position.clone().vadd(wp.right.scale(2)), radius: zone.width * 0.45 });
+      hazards.push({
+        surface: 'sludge',
+        center: wp.position.clone().vadd(wp.right.scale(2)),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.45,
+      });
     }
   }
   if (zone.id === 3) {
     for (const f of [0.18, 0.47, 0.79]) {
       const wp = at(f);
-      hazards.push({ surface: 'acidPuddle', center: wp.position.clone(), radius: zone.width * 0.28 });
+      hazards.push({
+        surface: 'acidPuddle',
+        center: wp.position.clone(),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.28,
+      });
     }
     for (const f of [0.05, 0.3, 0.55, 0.85]) {
       const wp = at(f);
-      hazards.push({ surface: 'acidLake', center: wp.position.clone().vadd(wp.right.scale(zone.width * 0.85)), radius: zone.width * 0.55 });
-      hazards.push({ surface: 'acidLake', center: wp.position.clone().vadd(wp.right.scale(-zone.width * 0.9)), radius: zone.width * 0.5 });
+      hazards.push({
+        surface: 'acidLake',
+        center: wp.position.clone().vadd(wp.right.scale(zone.width * 0.85)),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.55,
+      });
+      hazards.push({
+        surface: 'acidLake',
+        center: wp.position.clone().vadd(wp.right.scale(-zone.width * 0.9)),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.5,
+      });
     }
   }
   if (zone.id === 4) {
     for (const f of [0.12, 0.36, 0.61, 0.86]) {
       const wp = at(f);
-      hazards.push({ surface: 'oil', center: wp.position.clone(), radius: zone.width * 0.3 });
+      hazards.push({
+        surface: 'oil',
+        center: wp.position.clone(),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.3,
+      });
     }
   }
   if (zone.id === 5) {
     for (const f of [0.1, 0.4, 0.7, 0.9]) {
       const wp = at(f);
-      hazards.push({ surface: 'snow', center: wp.position.clone().vadd(wp.right.scale(-2)), radius: zone.width * 0.4 });
+      hazards.push({
+        surface: 'snow',
+        center: wp.position.clone().vadd(wp.right.scale(-2)),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.4,
+      });
     }
     for (const f of [0.25, 0.55, 0.8]) {
       const wp = at(f);
-      hazards.push({ surface: 'ice', center: wp.position.clone(), radius: zone.width * 0.3 });
+      hazards.push({
+        surface: 'ice',
+        center: wp.position.clone(),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.3,
+      });
     }
   }
   if (zone.id === 6) {
     for (const f of [0.08, 0.28, 0.52, 0.76]) {
       const wp = at(f);
-      hazards.push({ surface: 'lava', center: wp.position.clone().vadd(wp.right.scale(zone.width * 0.9)), radius: zone.width * 0.5 });
-      hazards.push({ surface: 'lava', center: wp.position.clone().vadd(wp.right.scale(-zone.width * 0.9)), radius: zone.width * 0.5 });
+      hazards.push({
+        surface: 'lava',
+        center: wp.position.clone().vadd(wp.right.scale(zone.width * 0.9)),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.5,
+      });
+      hazards.push({
+        surface: 'lava',
+        center: wp.position.clone().vadd(wp.right.scale(-zone.width * 0.9)),
+        tangent: wp.tangent.clone(),
+        radius: zone.width * 0.5,
+      });
     }
   }
   return hazards;
@@ -385,7 +512,9 @@ export function buildTrack(zoneId: ZoneId, layout: TrackLayout = 'flat'): TrackD
   const zone = ZONES.find((z) => z.id === zoneId);
   if (!zone) throw new Error(`Unknown zone ${zoneId}`);
   const controls = layout === 'hills' ? SERPENTINE_POINTS : CONTROL_POINTS[zoneId];
-  const samples = sampleCenterline(controls);
+  const sampled = sampleCenterline(controls);
+  const smoothed = relaxCenterline(sampled, zone.width);
+  const samples = resampleCenterline(smoothed, 4.5);
   const waypoints = computeWaypoints(samples, zone.width, true);
   let length = 0;
   let minY = Number.POSITIVE_INFINITY;
@@ -432,6 +561,39 @@ export function buildTrack(zoneId: ZoneId, layout: TrackLayout = 'flat'): TrackD
     ramps,
     pickups,
   };
+}
+
+const WORLD_UP = new Vec3(0, 1, 0);
+
+/** Нормаль дорожного полотна в точке сплайна (с учётом продольного уклона). */
+export function surfaceNormalFromTangent(tangent: Vec3): Vec3 {
+  const normal = new Vec3(
+    -tangent.y * tangent.x,
+    tangent.x * tangent.x + tangent.z * tangent.z,
+    -tangent.y * tangent.z,
+  );
+  if (normal.lengthSquared() < 1e-8) normal.set(0, 1, 0);
+  normal.normalize();
+  return normal;
+}
+
+/**
+ * Наклон плоскости полотна: только нормаль, без рыскания.
+ * Подходит для круглых декалей (пятна, лужи), которым поворот не важен.
+ */
+export function surfaceTiltQuaternion(tangent: Vec3): Quaternion {
+  return new Quaternion().setFromVectors(WORLD_UP, surfaceNormalFromTangent(tangent));
+}
+
+/**
+ * Полная ориентация полотна: рыскание вдоль трассы + наклон по уклону.
+ * Нужна прямоугольным объектам — ускорителям, трамплинам, воротам.
+ */
+export function surfaceQuaternionFromTangent(tangent: Vec3): Quaternion {
+  const yaw = Math.atan2(tangent.x, tangent.z);
+  const pitch = Math.atan2(tangent.y, Math.hypot(tangent.x, tangent.z));
+  const yawQ = new Quaternion().setFromEuler(0, yaw, 0);
+  return yawQ.mult(new Quaternion().setFromAxisAngle(new Vec3(1, 0, 0), -pitch));
 }
 
 export function waypointAt(track: TrackDefinition, index: number): Waypoint {

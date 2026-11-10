@@ -84,6 +84,29 @@ export function SettingsPanel({
         </div>
 
         <div className="settings-row">
+          <span>Модель вождения</span>
+          <div className="row">
+            <button
+              className={local.drivingMode === 'sim' ? 'primary' : 'ghost'}
+              onClick={() => update({ drivingMode: 'sim' })}
+            >
+              Симуляция
+            </button>
+            <button
+              className={local.drivingMode === 'arcade' ? 'primary' : 'ghost'}
+              onClick={() => update({ drivingMode: 'arcade' })}
+            >
+              Аркада
+            </button>
+          </div>
+          <span className="small muted">
+            {local.drivingMode === 'sim'
+              ? 'Сцепление шин по углу скольжения и весу: физически корректно, ошибки не прощаются'
+              : 'Цепкий руль, автовыравнивание и прижимная сила: проще и веселее'}
+          </span>
+        </div>
+
+        <div className="settings-row">
           <span>Плотность частиц</span>
           <div className="row">
             <button

@@ -43,7 +43,12 @@ export const CAMERA = {
 } as const;
 
 export const PHYSICS = {
-  chassis: { width: 2.0, height: 0.8, length: 4.0, shapeOffsetY: -0.35 },
+  /**
+   * Габариты корпуса (м). Нижняя грань бокса проходит на 0.53 м ниже COM,
+   * а колёса опускают COM ещё на ~0.9 м — на асфальте остаётся клиренс
+   * около 0.3 м, поэтому кузов не цепляется за стыки полотна.
+   */
+  chassis: { width: 1.9, height: 0.7, length: 3.9, shapeOffsetY: -0.18 },
   /** Высота, на которой корпус стоит над дорогой (полувысота кузова). */
   rideHeight: 0.62,
   wheelRadius: 0.42,
@@ -80,8 +85,8 @@ export const PHYSICS = {
   /** Тормозной коэффициент относительно ускорения машины. */
   brakeFactor: 1.2,
   /**
-   * Колёсный контроллер: рэйкаст-подвеска и шинные силы.
-   * Числа подобраны для аркадного ощущения, а не для точной симуляции.
+   * Колёсный контроллер: рэйкаст-подвеска и шинные силы. Базовые числа —
+   * для симуляции; аркадный режим переопределяет их в HANDLING.
    */
   wheels: {
     /** Колея (расстояние между колёсами одной оси). */
@@ -106,29 +111,38 @@ export const PHYSICS = {
     corneringStiffness: 9,
     /** Сопротивление качению как доля силы тяжести. */
     rollingResistance: 0.018,
-    /** Ограничение силы подвески на колесо в единицах веса машины. */
-    maxSpringForcePerMass: 90,
+    /**
+     * Ограничение силы подвески на колесо в единицах массы (Н/кг).
+     * 30 — это около 3 g на колесо: хватает на отбойник, но удар о стык
+     * полотна больше не подбрасывает машину.
+     */
+    maxSpringForcePerMass: 30,
     /** Ниже этой скорости машина не «ползёт» сама по себе (м/с). */
     stopSpeed: 0.22,
     /** Угловое ускорение рыскания в воздухе от руля (рад/с²). */
     airSteerRate: 1.2,
   },
-  /** Ограничение вертикальной скорости для стабильности. */
-  maxVerticalSpeed: 40,
+  /** Ограничение вертикальной скорости для стабильности (м/с). */
+  maxVerticalSpeed: 20,
   /** Угловая стабилизация крена/тангажа (1/с). */
   rollStabilization: 6,
   /** Скорость выравнивания кузова по рельефу (доля в секунду). */
   groundAlignRate: 9,
+  /** Предельная угловая скорость кузова (рад/с) — защита от «вертолёта». */
+  maxAngularSpeed: 12,
   /** Сглаживание руления (доля в секунду): убирает рывки угловой скорости. */
   steerSmoothing: 18,
-  restitutionBody: 0.05,
+  restitutionBody: 0.03,
   groundFriction: 0.35,
   /**
-   * Трение кузова о дорогу. Аркадная модель управляет сцеплением вручную
-   * (surfaceGrip + lateralGripRate), поэтому контактное трение cannon-es
-   * должно быть близко к нулю (GDD §6, §8).
+   * Трение кузова о дорогу. Сцепление колёс считается в контроллере, поэтому
+   * контактное трение cannon-es должно быть близко к нулю (GDD §6, §8).
    */
   carGroundFriction: 0,
+  /** Упругость отбойника: машина должна гаситься, а не отлетать. */
+  wallRestitution: 0.05,
+  /** Трение кузова об отбойник. */
+  wallFriction: 0.45,
   collideImpulse: 0.6,
   massDefault: 1000,
   /** Таран: минимальная относительная скорость, при которой наносится урон. */
@@ -139,6 +153,137 @@ export const PHYSICS = {
   /** Пауза между эпизодами урона от контакта одной пары машин. */
   carImpactCooldownSec: 0.4,
 } as const;
+
+/**
+ * Режим физики автомобиля (GDD §8).
+ *
+ * sim — симуляция: боковая сила шины считается по углу скольжения
+ * (упрощённая «магическая формула» Pacejka), машина поворачивает только
+ * за счёт сил в пятнах контакта, сцепление ограничено кругом трения,
+ * сцепление асфальта ~1.15 g — как у настоящей машины на летней резине.
+ *
+ * arcade — аркада: вязкая модель бокового сноса, ограничение угла руля
+ * по скорости, ассист стабилизации, автовыравнивание и прижимная сила.
+ * Машина прощает ошибки, но ведёт себя предсказуемо.
+ *
+ * Точки приложения сил и подвеска одинаковые — режимы отличаются только
+ * параметрами шин и ассистов.
+ */
+export type DrivingMode = 'sim' | 'arcade';
+
+export type HandlingSpec = {
+  id: DrivingMode;
+  label: string;
+  description: string;
+  /** Модель шины: по углу скольжения или вязкое сопротивление. */
+  tireModel: 'slip' | 'damping';
+  /** Пиковый коэффициент сцепления шины (μ). */
+  tireGrip: number;
+  /** Угол скольжения пика боковой силы (рад). */
+  peakSlip: number;
+  /** Коэффициенты упрощённой формулы Pacejka: B — форма, C — пик. */
+  tireShape: number;
+  tireCurve: number;
+  /** Скорость нарастания боковой силы (1/с) — релаксация шины. */
+  tireRelaxation: number;
+  /** Минимальная продольная скорость в знаменателе угла скольжения (м/с). */
+  slipSpeedFloor: number;
+  /** Жёсткость бокового демпфирования аркадной модели (1/с). */
+  lateralStiffness: number;
+  /** Максимальный угол поворота колёс (рад). */
+  steerMaxAngle: number;
+  /** Скорость, на которой угол руля падает вдвое (м/с). */
+  steerFalloffSpeed: number;
+  /**
+   * Предельное боковое ускорение для ограничения угла руля (м/с²).
+   * Это не «чит»: даже в симуляторах клавиатурный руль ограничивают по
+   * скорости, иначе на 120 км/ч машина мгновенно уходит в снос.
+   */
+  lateralLimit: number;
+  /** Доля велосипедной модели в угловой скорости (0 — только силы шин). */
+  yawAssist: number;
+  /** Гашение рыскания (1/с). */
+  yawDamping: number;
+  /** Автовыравнивание руля на прямой (1/с). */
+  autoStraighten: number;
+  /** Скорость выравнивания кузова по рельефу (1/с). */
+  alignRate: number;
+  /** Гашение крена/тангажа (1/с). */
+  rollStabilization: number;
+  /** Управление в воздухе (рад/с²). */
+  airSteerRate: number;
+  /** Прижимная сила: доля веса на (v / 40)². */
+  downforce: number;
+  /** Предел вертикальной скорости (м/с). */
+  maxVerticalSpeed: number;
+  /** Предел угловой скорости кузова (рад/с). */
+  maxAngularSpeed: number;
+  /** Доля угловой скорости, остающаяся после удара об отбойник. */
+  impactDamping: number;
+  /** Ассистент стабилизации: ограничивает занос по сцеплению. */
+  stabilityControl: number;
+  /** Предельный крен кузова относительно полотна (рад). */
+  maxBodyRoll: number;
+};
+
+export const HANDLING: Record<DrivingMode, HandlingSpec> = {
+  sim: {
+    id: 'sim',
+    label: 'Симуляция',
+    description: 'Настоящая машина: сцепление, снос, вес и инерция. Ошибки не прощаются.',
+    tireModel: 'slip',
+    tireGrip: 1.15,
+    peakSlip: 0.14,
+    tireShape: 9,
+    tireCurve: 1.45,
+    tireRelaxation: 28,
+    slipSpeedFloor: 2.5,
+    lateralStiffness: 0,
+    steerMaxAngle: 0.6,
+    steerFalloffSpeed: 26,
+    lateralLimit: 9.82,
+    yawAssist: 0,
+    yawDamping: 1.2,
+    autoStraighten: 0,
+    alignRate: 5,
+    rollStabilization: 2.5,
+    airSteerRate: 0.5,
+    downforce: 0.04,
+    maxVerticalSpeed: 16,
+    maxAngularSpeed: 9,
+    impactDamping: 0.55,
+    stabilityControl: 0,
+    maxBodyRoll: 1.15,
+  },
+  arcade: {
+    id: 'arcade',
+    label: 'Аркада',
+    description: 'Прощающая модель: цепкий руль, автовыравнивание, машина не срывается в занос.',
+    tireModel: 'damping',
+    tireGrip: 1.75,
+    peakSlip: 0.2,
+    tireShape: 7,
+    tireCurve: 1.3,
+    tireRelaxation: 30,
+    slipSpeedFloor: 2,
+    lateralStiffness: 8,
+    steerMaxAngle: 0.58,
+    steerFalloffSpeed: 13,
+    lateralLimit: 12.5,
+    yawAssist: 0.5,
+    yawDamping: 0,
+    autoStraighten: 2.5,
+    alignRate: 9,
+    rollStabilization: 6,
+    airSteerRate: 1.2,
+    downforce: 0.12,
+    maxVerticalSpeed: 20,
+    maxAngularSpeed: 12,
+    impactDamping: 0.7,
+    stabilityControl: 1,
+    maxBodyRoll: 0.45,
+  },
+};
 
 export const AMMO = {
   /** Доля переднего боезапаса за один ящик утиля. */

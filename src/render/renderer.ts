@@ -20,6 +20,16 @@ export type Vec3Like = { x: number; y: number; z: number };
 /** Минимум данных для построения ленты дороги: точка + поперечная ось. */
 export type RibbonPoint = { position: Vec3Like; right: Vec3Like };
 
+/** Точка профиля поперечного сечения: смещение от центра трассы и высота. */
+export type ProfilePoint = { offset: number; y: number };
+
+export type ProfileSweepOptions = {
+  /** Профиль замкнут (отбойник) или это открытая лента (дорога, обочина). */
+  closedProfile?: boolean;
+  /** Замкнуть кольцо по станциям (трасса) или оставить открытым (секция). */
+  closedLoop?: boolean;
+};
+
 export class GameRenderer {
   readonly renderer: Renderer;
   readonly gl: OGLRenderingContext;
@@ -254,7 +264,7 @@ export class GameRenderer {
       const rx = wp.position.x + wp.right.x * half;
       const ry = wp.position.y + wp.right.y * half;
       const rz = wp.position.z + wp.right.z * half;
-      positions.push(lx, ly + 0.03, lz, rx, ry + 0.03, rz);
+      positions.push(lx, ly + 0.06, lz, rx, ry + 0.06, rz);
 
       // Нормаль ленты с учётом уклона: up = tangent × right.
       const tx = next.position.x - prev.position.x;
@@ -287,6 +297,82 @@ export class GameRenderer {
       normal: { size: 3, data: new Float32Array(normals) },
       uv: { size: 2, data: new Float32Array(uvs) },
       index: { data: new Uint16Array(indices) },
+    });
+    const mesh = new Mesh(this.gl, { geometry, program: this.materials.lit(color) });
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+
+  /**
+   * Выдавливает поперечный профиль вдоль трассы. Так строятся обочины и
+   * отбойники: одна непрерывная лента вместо набора примитивов, поэтому
+   * на повороте нет ни наложения на внутреннем радиусе, ни щелей на внешнем.
+   */
+  createProfileSweep(
+    waypoints: RibbonPoint[],
+    profile: ProfilePoint[],
+    color: number,
+    options: ProfileSweepOptions = {},
+  ): Mesh {
+    const closedProfile = options.closedProfile ?? false;
+    const closedLoop = options.closedLoop ?? true;
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const count = waypoints.length;
+    const profileCount = profile.length;
+    if (count < 2 || profileCount < 2) throw new Error('Profile sweep needs at least 2 points');
+    const stationCount = closedLoop ? count : count - 1;
+    const edgeCount = closedProfile ? profileCount : profileCount - 1;
+
+    for (let i = 0; i < stationCount; i += 1) {
+      const a = waypoints[i] as RibbonPoint;
+      const b = waypoints[(i + 1) % count] as RibbonPoint;
+      const tx = b.position.x - a.position.x;
+      const ty = b.position.y - a.position.y;
+      const tz = b.position.z - a.position.z;
+      for (let j = 0; j < edgeCount; j += 1) {
+        const p0 = profile[j] as ProfilePoint;
+        const p1 = profile[(j + 1) % profileCount] as ProfilePoint;
+        const a0x = a.position.x + a.right.x * p0.offset;
+        const a0y = a.position.y + p0.y;
+        const a0z = a.position.z + a.right.z * p0.offset;
+        const a1x = a.position.x + a.right.x * p1.offset;
+        const a1y = a.position.y + p1.y;
+        const a1z = a.position.z + a.right.z * p1.offset;
+        const b0x = b.position.x + b.right.x * p0.offset;
+        const b0y = b.position.y + p0.y;
+        const b0z = b.position.z + b.right.z * p0.offset;
+        const b1x = b.position.x + b.right.x * p1.offset;
+        const b1y = b.position.y + p1.y;
+        const b1z = b.position.z + b.right.z * p1.offset;
+
+        // Нормаль грани: ребро профиля × направление трассы.
+        const ex = a.right.x * (p1.offset - p0.offset);
+        const ey = p1.y - p0.y;
+        const ez = a.right.z * (p1.offset - p0.offset);
+        let nx = ey * tz - ez * ty;
+        let ny = ez * tx - ex * tz;
+        let nz = ex * ty - ey * tx;
+        const length = Math.hypot(nx, ny, nz) || 1;
+        nx /= length;
+        ny /= length;
+        nz /= length;
+        // Нижние грани не освещаем «из-под земли»: разворачиваем вверх.
+        if (ny < -1e-4) {
+          nx = -nx;
+          ny = -ny;
+          nz = -nz;
+        }
+
+        positions.push(a0x, a0y, a0z, b0x, b0y, b0z, a1x, a1y, a1z);
+        positions.push(b0x, b0y, b0z, b1x, b1y, b1z, a1x, a1y, a1z);
+        for (let v = 0; v < 6; v += 1) normals.push(nx, ny, nz);
+      }
+    }
+
+    const geometry = new Geometry(this.gl, {
+      position: { size: 3, data: new Float32Array(positions) },
+      normal: { size: 3, data: new Float32Array(normals) },
     });
     const mesh = new Mesh(this.gl, { geometry, program: this.materials.lit(color) });
     mesh.frustumCulled = false;

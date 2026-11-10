@@ -1,8 +1,8 @@
 import { Body, Vec3 } from 'cannon-es';
-import { PHYSICS } from '../config/balance';
+import { HANDLING, PHYSICS, type DrivingMode } from '../config/balance';
 import type { Drivetrain } from '../config/cars';
 import type { PhysicsWorld } from '../physics/physicsWorld';
-import { steeringAngle } from './vehicleMath';
+import { speedLimitedSteer, tireLateralForce } from './vehicleMath';
 
 /**
  * Собственный колёсный контроллер (без cannon-es RaycastVehicle/RigidVehicle).
@@ -12,8 +12,14 @@ import { steeringAngle } from './vehicleMath';
  * продольная (тяга/тормоз) и поперечная (сцепление) силы шины. Тяга
  * распределяется по осям согласно приводу: FWD, RWD или AWD.
  *
- * Модель намеренно аркадная: силы ограничены сцеплением, а не точной
- * эмуляцией пятна контакта.
+ * Два режима (GDD §8):
+ *  - `sim` — боковая сила шины по углу скольжения и упрощённой формуле
+ *    Pacejka; машина поворачивает только за счёт сил в пятнах контакта,
+ *    а сумма сил ограничена кругом трения (μ ≈ 1.15 на асфальте).
+ *  - `arcade` — вязкая модель бокового сноса, ассист руля и стабилизации:
+ *    машина цепляется за дорогу и прощает ошибки.
+ *
+ * Подвеска, точки приложения сил и вес машины в обоих режимах одинаковые.
  */
 
 export type WheelDefinition = {
@@ -41,6 +47,8 @@ export type WheelState = {
   compression: number;
   /** Нормальная нагрузка на колесо (Н). */
   load: number;
+  /** Текущая боковая сила шины (Н) с учётом релаксации. */
+  lateralForce: number;
   contactPoint: Vec3;
 };
 
@@ -64,6 +72,7 @@ export type VehicleStepParams = {
   surfaceGrip: number;
   drivetrain: Drivetrain;
   nitroMult: number;
+  mode: DrivingMode;
   dt: number;
 };
 
@@ -73,6 +82,7 @@ function makeWheelState(): WheelState {
     suspensionLength: PHYSICS.wheels.restLength + PHYSICS.wheels.travel,
     compression: 0,
     load: 0,
+    lateralForce: 0,
     contactPoint: new Vec3(),
   };
 }
@@ -99,6 +109,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 type WheelContact = {
+  index: number;
   wheel: WheelDefinition;
   springForce: number;
   contactPoint: Vec3;
@@ -116,6 +127,7 @@ export function stepVehicle(
   ignoreBody?: (body: Body) => boolean,
 ): void {
   const { dt, mass, acceleration, maxSpeed } = params;
+  const handling = HANDLING[params.mode];
   const wheelConfig = PHYSICS.wheels;
   const forward = body.quaternion.vmult(new Vec3(0, 0, 1));
   forward.y = 0;
@@ -128,7 +140,16 @@ export function stepVehicle(
 
   const speed = body.velocity.dot(forward);
   state.speed = speed;
-  state.steerAngle = steeringAngle(params.steer, speed);
+  const gripLimit = Math.max(0.05, params.grip * Math.max(0.05, params.surfaceGrip));
+  // Ограничение угла руля по сцеплению и скорости: без него на 120 км/ч
+  // полный ход клавиши сразу срывает переднюю ось в снос.
+  state.steerAngle = speedLimitedSteer(
+    params.steer,
+    speed,
+    handling.steerMaxAngle,
+    handling.steerFalloffSpeed,
+    handling.lateralLimit * gripLimit,
+  );
   const steer = state.steerAngle;
 
   const springK = wheelConfig.springStiffness * mass;
@@ -178,9 +199,10 @@ export function stepVehicle(
     wheelState.suspensionLength = suspensionLength;
     wheelState.load = springForce;
     wheelState.contactPoint.copy(contactPoint);
+    if (!grounded) wheelState.lateralForce = 0;
     if (grounded && springForce > 0) {
       groundedWheels += 1;
-      contacts.push({ wheel, springForce, contactPoint });
+      contacts.push({ index, wheel, springForce, contactPoint });
     }
   }
 
@@ -188,9 +210,17 @@ export function stepVehicle(
   if (groundedWheels === 0) {
     // В воздухе руль немного доворачивает кузов — так машина не «замирает»
     // после трамплина.
-    body.angularVelocity.y += params.steer * wheelConfig.airSteerRate * dt;
+    body.angularVelocity.y += params.steer * handling.airSteerRate * dt;
     applyAeroDrag(body, mass);
     return;
+  }
+
+  // Прижимная сила: доля веса на скорости 40 м/с. Она давит на кузов,
+  // подвеска сжимается, и нагрузка на шины растёт сама собой.
+  const speedRatio = Math.min(1.6, Math.abs(speed) / 40);
+  if (handling.downforce > 0) {
+    const downforce = mass * 9.82 * handling.downforce * speedRatio * speedRatio;
+    body.applyForce(new Vec3(0, -downforce, 0));
   }
 
   const nitroMult = params.nitroMult;
@@ -206,7 +236,7 @@ export function stepVehicle(
   const canDrive = speed < maxSpeed * nitroMult;
   const canReverse = speed > -maxSpeed * PHYSICS.maxReverseFactor;
 
-  const maxFrictionScale = params.grip * params.surfaceGrip * wheelConfig.tireFriction;
+  const tireMu = gripLimit * handling.tireGrip;
 
   for (const contact of contacts) {
     const wheelForward = contact.wheel.steer
@@ -221,10 +251,19 @@ export function stepVehicle(
     const pointVelocity = body.getVelocityAtWorldPoint(contact.contactPoint, new Vec3());
     const longSpeed = pointVelocity.dot(wheelForward);
     const lateralSpeed = pointVelocity.dot(wheelRight);
+    const wheelState = state.wheels[contact.index] as WheelState;
+
+    // Круг трения: продольная и поперечная силы вместе не могут превысить
+    // сцепление шины с покрытием.
+    const maxFriction = contact.springForce * tireMu;
 
     let desiredLong = 0;
     const share = driveShare(params.drivetrain, contact.wheel);
-    if (throttle > 0 && share > 0 && canDrive) desiredLong += driveForce * share;
+    // Тяга снижается, когда машину уже несёт боком: так аркадный ассист
+    // стабилизации не даёт «дрифту» превратиться в неуправляемый занос.
+    const sliding = Math.min(1, Math.abs(lateralSpeed) / 6);
+    const traction = 1 - handling.stabilityControl * 0.5 * sliding;
+    if (throttle > 0 && share > 0 && canDrive) desiredLong += driveForce * share * traction;
     if (brake > 0) {
       if (brakingForward) desiredLong -= brakeForce / groundedWheels;
       else if (share > 0 && canReverse) desiredLong -= reverseForce * share;
@@ -233,8 +272,24 @@ export function stepVehicle(
       desiredLong -= Math.sign(longSpeed) * (rollingForce / groundedWheels);
     }
 
-    let desiredLateral = -lateralSpeed * mass * wheelConfig.corneringStiffness / groundedWheels;
-    const maxFriction = contact.springForce * maxFrictionScale;
+    let desiredLateral: number;
+    if (handling.tireModel === 'slip') {
+      // Угол скольжения: atan(боковая / продольная). Пол на продольной
+      // скорости убирает сингулярность на месте.
+      const slipAngle = Math.atan2(lateralSpeed, Math.max(handling.slipSpeedFloor, Math.abs(longSpeed)));
+      const target =
+        tireLateralForce(slipAngle, handling.peakSlip, handling.tireShape, handling.tireCurve) *
+        maxFriction;
+      // Релаксация шины: сила нарастает не мгновенно, иначе на разбитом
+      // покрытии появляется высокочастотная тряска.
+      const relax = 1 - Math.exp(-handling.tireRelaxation * dt);
+      wheelState.lateralForce += (target - wheelState.lateralForce) * relax;
+      desiredLateral = wheelState.lateralForce;
+    } else {
+      desiredLateral = (-lateralSpeed * mass * handling.lateralStiffness) / groundedWheels;
+      wheelState.lateralForce = desiredLateral;
+    }
+
     const magnitude = Math.hypot(desiredLong, desiredLateral);
     if (magnitude > maxFriction && magnitude > 1e-6) {
       const scale = maxFriction / magnitude;
@@ -246,6 +301,26 @@ export function stepVehicle(
     if (force.lengthSquared() > 1e-6) {
       body.applyForce(force, contact.contactPoint.vsub(body.position));
     }
+  }
+
+  // Аркадный руль доворачивает кузов по велосипедной модели, чтобы отклик
+  // был мгновенным. В симуляции угловую скорость создают только силы шин.
+  if (handling.yawAssist > 0 && Math.abs(speed) > PHYSICS.steerDeadSpeed) {
+    const kinematic = (speed * Math.tan(steer)) / PHYSICS.wheelbase;
+    const yawLimit = (handling.lateralLimit * gripLimit) / Math.abs(speed);
+    const target = clamp(kinematic, -yawLimit, yawLimit);
+    const weight = 1 - Math.exp(-handling.yawAssist * 12 * dt);
+    body.angularVelocity.y += (target - body.angularVelocity.y) * weight;
+  }
+  // Угловая скорость не может превышать предел сцепления: без этого
+  // ассист складывается с силами шин и машина закручивается юлой.
+  const yawCap = (handling.lateralLimit * gripLimit) / Math.max(3, Math.abs(speed));
+  body.angularVelocity.y = clamp(body.angularVelocity.y, -yawCap, yawCap);
+  if (handling.yawDamping > 0) {
+    body.angularVelocity.y *= Math.exp(-handling.yawDamping * dt);
+  }
+  if (handling.autoStraighten > 0 && Math.abs(params.steer) < 0.05) {
+    body.angularVelocity.y *= Math.exp(-handling.autoStraighten * dt);
   }
 
   applyAeroDrag(body, mass);

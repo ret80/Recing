@@ -1,9 +1,11 @@
 import {
   ECONOMY,
+  HANDLING,
   SETTINGS_KEY,
   STORAGE_KEY,
   TRACK_LAYOUTS,
   ZONES,
+  type DrivingMode,
   type PilotId,
   type TrackLayout,
   type ZoneId,
@@ -37,6 +39,8 @@ export type GameSettings = {
   postProcessing: boolean;
   cameraShake: boolean;
   quality: 'high' | 'low';
+  /** Модель вождения: физически корректная симуляция или прощающая аркада. */
+  drivingMode: DrivingMode;
 };
 
 export function emptyUpgrades(): UpgradeState {
@@ -65,7 +69,14 @@ export function defaultProfile(): PlayerProfile {
 }
 
 export function defaultSettings(): GameSettings {
-  return { volume: 0.6, particles: 'high', postProcessing: false, cameraShake: true, quality: 'high' };
+  return {
+    volume: 0.6,
+    particles: 'high',
+    postProcessing: false,
+    cameraShake: true,
+    quality: 'high',
+    drivingMode: 'sim',
+  };
 }
 
 function sanitizeProfile(raw: unknown): PlayerProfile {
@@ -109,12 +120,16 @@ export function saveProfile(profile: PlayerProfile): void {
 }
 
 export function loadSettings(): GameSettings {
+  const base = defaultSettings();
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return defaultSettings();
-    return { ...defaultSettings(), ...(JSON.parse(raw) as Partial<GameSettings>) };
+    if (!raw) return base;
+    const stored = JSON.parse(raw) as Partial<GameSettings>;
+    const drivingMode =
+      stored.drivingMode && stored.drivingMode in HANDLING ? stored.drivingMode : base.drivingMode;
+    return { ...base, ...stored, drivingMode };
   } catch {
-    return defaultSettings();
+    return base;
   }
 }
 

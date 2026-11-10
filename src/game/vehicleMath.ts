@@ -66,11 +66,49 @@ export function idealCornerSpeed(maxSpeed: number, skill: number, grip: number, 
  * Угол поворота колёс (рад). На малой скорости руль выкручивается полностью,
  * на высокой — угол падает, иначе машина «складывается» на прямой.
  */
-export function steeringAngle(steer: number, speed: number): number {
+export function steeringAngle(
+  steer: number,
+  speed: number,
+  maxAngle: number = PHYSICS.steerMaxAngle,
+  falloffSpeed: number = PHYSICS.steerFalloffSpeed,
+): number {
   const magnitude = Math.abs(speed);
   if (magnitude <= PHYSICS.steerDeadSpeed) return 0;
-  const falloff = 1 / (1 + magnitude / PHYSICS.steerFalloffSpeed);
-  return steer * PHYSICS.steerMaxAngle * falloff;
+  const falloff = 1 / (1 + magnitude / Math.max(1, falloffSpeed));
+  return steer * maxAngle * falloff;
+}
+
+/**
+ * Угол руля с ограничением по предельному боковому ускорению.
+ * Без него на 120 км/ч полный ход клавиши сразу выкручивает колёса на 20°
+ * и машина уходит в снос — даже в симуляторах клавиатурный руль так
+ * ограничивают. На прямой ограничение не действует.
+ */
+export function speedLimitedSteer(
+  steer: number,
+  speed: number,
+  maxAngle: number,
+  falloffSpeed: number,
+  lateralLimit: number,
+): number {
+  const base = steeringAngle(steer, speed, maxAngle, falloffSpeed);
+  const magnitude = Math.abs(speed);
+  if (magnitude <= PHYSICS.steerDeadSpeed || lateralLimit <= 0) return base;
+  const limit = Math.atan((PHYSICS.wheelbase * lateralLimit) / (magnitude * magnitude));
+  const allowed = Math.max(0.02, limit);
+  return Math.sign(base) * Math.min(Math.abs(base), allowed);
+}
+
+/**
+ * Нормированная боковая сила шины от угла скольжения: упрощённая
+ * «магическая формула» Pacejka F = sin(C · atan(B · tan α)).
+ * Пик μ приходится на peakSlip, дальше сила падает до ~76% — это и есть
+ * срыв в скольжение. Возвращает значение в диапазоне -1..1.
+ */
+export function tireLateralForce(slipAngle: number, peakSlip: number, shape: number, curve: number): number {
+  if (peakSlip <= 0) return 0;
+  const normalized = slipAngle / peakSlip;
+  return -Math.sin(curve * Math.atan(shape * normalized));
 }
 
 /**

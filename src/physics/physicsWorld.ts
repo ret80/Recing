@@ -13,12 +13,22 @@ import {
 import { PHYSICS, WORLD } from '../config/balance';
 import type { ComputedStats } from '../config/cars';
 
-/** Высота COM кузова над плоскостью дороги. */
-export const CHASSIS_REST_Y = PHYSICS.chassis.height / 2 - PHYSICS.chassis.shapeOffsetY;
+/**
+ * Равновесная высота COM кузова над плоскостью дороги: колесо касается
+ * земли, подвеска сжата весом машины. Считается из геометрии подвески,
+ * поэтому не зависит от массы (жёсткость пружины задана на килограмм).
+ */
+export const CHASSIS_REST_Y =
+  PHYSICS.wheelRadius +
+  PHYSICS.wheels.restLength -
+  WORLD.gravity / (4 * PHYSICS.wheels.springStiffness) -
+  PHYSICS.wheels.attachY;
 
 export type RaycastHit = {
   body: Body | null;
   point: Vec3;
+  /** Нормаль поверхности в точке попадания (смотрит из поверхности). */
+  normal: Vec3;
   distance: number;
 };
 
@@ -35,7 +45,7 @@ export class PhysicsWorld {
     });
     this.world.broadphase = new SAPBroadphase(this.world);
     this.world.defaultContactMaterial.friction = PHYSICS.groundFriction;
-    this.world.defaultContactMaterial.restitution = 0.05;
+    this.world.defaultContactMaterial.restitution = PHYSICS.restitutionBody;
 
     this.groundMaterial = new Material('ground');
     this.carMaterial = new Material('car');
@@ -49,8 +59,8 @@ export class PhysicsWorld {
     );
     this.world.addContactMaterial(
       new ContactMaterial(this.wallMaterial, this.carMaterial, {
-        friction: 0.05,
-        restitution: 0.35,
+        friction: PHYSICS.wallFriction,
+        restitution: PHYSICS.wallRestitution,
       }),
     );
     this.world.addContactMaterial(
@@ -87,11 +97,20 @@ export class PhysicsWorld {
    * Участок дорожного полотна между двумя точками сплайна.
    * Верхняя грань бокса проходит точно через a и b — поэтому уклон
    * получается честным, без «ступенек» из горизонтальных плит.
+   *
+   * Бокс удлиняется на `overlap` с каждой стороны: на повороте соседние
+   * сегменты расходятся клином, и без перекрытия на внешней кромке
+   * поворота появлялась дыра, в которую проваливалась машина.
    */
-  addTrackSegment(a: Vec3, b: Vec3, halfWidth: number, thickness = 1.2): Body {
+  addTrackSegment(a: Vec3, b: Vec3, halfWidth: number, thickness = 1.2, overlap = 1.1): Body {
     const delta = b.vsub(a);
+    const fullLength = delta.length();
+    if (fullLength < 1e-5) return this.addGroundBox(a.x, a.z, halfWidth, 0.1, 0);
+    const dir = delta.scale(1 / fullLength);
+    const start = a.vsub(dir.scale(overlap));
+    const end = b.vadd(dir.scale(overlap));
     const horizontal = Math.hypot(delta.x, delta.z);
-    const length = Math.hypot(horizontal, delta.y);
+    const length = Math.hypot(horizontal, delta.y) + overlap * 2;
     const yaw = Math.atan2(delta.x, delta.z);
     const pitch = Math.atan2(delta.y, Math.max(1e-4, horizontal));
     const rotation = new Quaternion().setFromEuler(0, yaw, 0);
@@ -99,8 +118,8 @@ export class PhysicsWorld {
     rotation.normalize();
     const up = rotation.vmult(new Vec3(0, 1, 0));
     const body = new Body({ mass: 0, material: this.groundMaterial });
-    body.addShape(new Box(new Vec3(halfWidth, thickness, length / 2 + 0.02)));
-    body.position.copy(a.clone().vadd(b).scale(0.5).vsub(up.scale(thickness)));
+    body.addShape(new Box(new Vec3(halfWidth, thickness, length / 2)));
+    body.position.copy(start.vadd(end).scale(0.5).vsub(up.scale(thickness)));
     body.quaternion.copy(rotation);
     this.world.addBody(body);
     return body;
@@ -110,6 +129,26 @@ export class PhysicsWorld {
     const body = new Body({ mass: 0, material: this.wallMaterial });
     body.addShape(new Box(new Vec3(0.5, height, halfLength)));
     body.position.set(x, baseY + height, z);
+    body.quaternion.setFromEuler(0, yaw, 0);
+    this.world.addBody(body);
+    return body;
+  }
+
+  /**
+   * Отбойник между двумя точками трассы: вертикальный бокс, следующий
+   * за сплайном. Соседние секции перекрываются, поэтому ограждение
+   * остаётся сплошным и на внутренней, и на внешней стороне поворота.
+   */
+  addWallSegment(a: Vec3, b: Vec3, height = 1.35, thickness = 0.36, overlap = 0.5): Body {
+    const deltaX = b.x - a.x;
+    const deltaZ = b.z - a.z;
+    const horizontal = Math.hypot(deltaX, deltaZ);
+    const yaw = Math.atan2(deltaX, deltaZ);
+    const halfLength = Math.max(0.2, horizontal / 2 + overlap);
+    const baseY = Math.min(a.y, b.y) - 0.25;
+    const body = new Body({ mass: 0, material: this.wallMaterial });
+    body.addShape(new Box(new Vec3(thickness / 2, (height + 0.4) / 2, halfLength)));
+    body.position.set((a.x + b.x) / 2, baseY + (height + 0.4) / 2, (a.z + b.z) / 2);
     body.quaternion.setFromEuler(0, yaw, 0);
     this.world.addBody(body);
     return body;
@@ -195,6 +234,7 @@ export class PhysicsWorld {
         best = {
           body: result.body,
           point: result.hitPointWorld.clone(),
+          normal: result.hitNormalWorld.clone(),
           distance,
         };
       }

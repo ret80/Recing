@@ -4,6 +4,7 @@ import {
   AI_CONFIG,
   AMMO,
   COMMENTARY,
+  HANDLING,
   LIMITS,
   PHYSICS,
   PILOTS,
@@ -14,6 +15,7 @@ import {
   TRACK_LAYOUTS,
   WEAPON_TUNING,
   WORLD,
+  type HandlingSpec,
   type PilotSpec,
   type SurfaceType,
   type TrackLayout,
@@ -355,6 +357,12 @@ export class Game {
       if (event.body.material === this.physics.wallMaterial) {
         const engine = this.world.get(id, EngineState);
         if (engine) engine.lastWallHit = this.raceTime;
+        // Удар об отбойник гасит вращение: иначе машина отлетает кувырком.
+        const body = this.world.get(id, Physics)?.body;
+        if (body) {
+          const damping = this.handling().impactDamping;
+          body.angularVelocity.scale(damping, body.angularVelocity);
+        }
       }
     });
   }
@@ -446,6 +454,7 @@ export class Game {
     for (const id of this.carIds) this.vehiclePreStep(id, dt);
     this.physics.step(dt);
     for (const id of this.carIds) {
+      this.stabilizeBody(id);
       this.updateGround(id);
       this.vehiclePostStep(id, dt);
       this.updateWheelVisuals(id);
@@ -493,6 +502,31 @@ export class Game {
     }
   }
 
+  /** Параметры выбранного режима вождения. */
+  private handling(): HandlingSpec {
+    return HANDLING[this.settings.drivingMode];
+  }
+
+  /**
+   * Страховка после шага физики: удар об отбойник или трамплин не должен
+   * раскручивать кузов до «вертолёта» и подбрасывать машину на десятки метров.
+   */
+  private stabilizeBody(id: EntityId): void {
+    const physics = this.world.get(id, Physics);
+    const carState = this.world.get(id, CarState);
+    const body = physics?.body;
+    if (!body || !carState || carState.phase !== 'alive') return;
+    const handling = this.handling();
+    const verticalLimit = handling.maxVerticalSpeed;
+    if (body.velocity.y > verticalLimit) body.velocity.y = verticalLimit;
+    else if (body.velocity.y < -verticalLimit * 1.5) body.velocity.y = -verticalLimit * 1.5;
+    const angular = body.angularVelocity;
+    const magnitude = angular.length();
+    if (magnitude > handling.maxAngularSpeed) {
+      angular.scale(handling.maxAngularSpeed / magnitude, angular);
+    }
+  }
+
   /**
    * Управление угловой скоростью до шага физики.
    * Руление — велосипедная модель: ω = v · tan(δ) / база, ограниченная сцеплением.
@@ -515,7 +549,8 @@ export class Game {
     }
     const body = physics.body;
     body.wakeUp();
-    const stabilize = Math.exp(-PHYSICS.rollStabilization * dt);
+    const handling = this.handling();
+    const stabilize = Math.exp(-handling.rollStabilization * dt);
 
     if (chassis.type === 'wheeled') {
       const state = this.vehicleStates.get(id) ?? createVehicleState();
@@ -536,6 +571,7 @@ export class Game {
           surfaceGrip: surface.grip,
           drivetrain: stats.drivetrain,
           nitroMult: engine.nitroTimer > 0 ? WEAPON_TUNING.nitroAccelMult : 1,
+          mode: this.settings.drivingMode,
           dt,
         },
         (candidate) => this.bodyToEntity.has(candidate),
@@ -669,9 +705,26 @@ export class Game {
 
     const tilt = new Quaternion().setFromVectors(new Vec3(0, 1, 0), normal);
     const target = tilt.mult(yawQ);
-    const alpha = 1 - Math.exp(-PHYSICS.groundAlignRate * dt);
+    const handling = this.handling();
+    const alpha = 1 - Math.exp(-handling.alignRate * dt);
     body.quaternion.slerp(target, alpha, body.quaternion);
     body.quaternion.normalize();
+
+    // Ограничение крена: кузов не должен ложиться на бок от боковой
+    // перегрузки, особенно в аркадном режиме. Сравниваем с плоскостью
+    // полотна, а не с горизонтом: на склоне машина стоит наклонно.
+    const worldUp = new Vec3(0, 1, 0);
+    const bodyUp = body.quaternion.vmult(worldUp);
+    const targetUp = target.vmult(worldUp);
+    const bodyRoll = Math.acos(Math.max(-1, Math.min(1, bodyUp.dot(targetUp))));
+    if (bodyRoll > handling.maxBodyRoll) {
+      const recover = 1 - Math.exp(-20 * dt);
+      body.quaternion.slerp(target, recover, body.quaternion);
+      body.quaternion.normalize();
+      // Убираем и угловую скорость крена, иначе кузов «догоняет» себя.
+      body.angularVelocity.x *= 0.6;
+      body.angularVelocity.z *= 0.6;
+    }
   }
 
   private syncCarTransform(id: EntityId): void {
@@ -682,6 +735,30 @@ export class Game {
     // без этого картинка дёргается на мониторах с частотой не 60 Гц.
     transform.position.copy(physics.body.interpolatedPosition);
     transform.rotation.copy(physics.body.interpolatedQuaternion);
+  }
+
+  /**
+   * Точка и ориентация поверхности под заданными координатами: луч вниз,
+   * машины игнорируются. Нужна декалям, минам и мелким объектам, чтобы они
+   * ложились на полотно, а не на горизонтальную плоскость y = 0.
+   */
+  private groundPlacement(
+    x: number,
+    z: number,
+    fromY: number,
+  ): { y: number; quaternion: Quaternion } | null {
+    const hit = this.physics.raycast(
+      new Vec3(x, fromY, z),
+      new Vec3(x, fromY - 9, z),
+      null,
+      (candidate) => this.bodyToEntity.has(candidate),
+    );
+    if (!hit) return null;
+    const normal = hit.normal.lengthSquared() > 1e-6 ? hit.normal : new Vec3(0, 1, 0);
+    return {
+      y: hit.point.y,
+      quaternion: new Quaternion().setFromVectors(new Vec3(0, 1, 0), normal),
+    };
   }
 
   private groundHeight(body: Body): number | null {
@@ -986,8 +1063,10 @@ export class Game {
     if (!ownerPhysics?.body) return;
     const spec = FRONT_WEAPONS[kind];
     const body = ownerPhysics.body;
+    // Стволы смотрят вдоль кузова: на подъёме нос выше кормы, и снаряд
+    // уходит вверх по склону, а не в асфальт.
     const forward = forwardVector(body.quaternion);
-    forward.y = 0;
+    if (forward.lengthSquared() < 1e-6) forward.set(0, 0, 1);
     forward.normalize();
     const right = rightVector(body.quaternion);
     const offsets = spec.twin ? [-0.65, 0.65] : [0];
@@ -1044,8 +1123,11 @@ export class Game {
     const forward = forwardVector(body.quaternion);
     forward.y = 0;
     forward.normalize();
-    const position = body.position.clone().vadd(forward.scale(-2.4));
-    position.y = kind === 'oilSlick' ? 0.08 : 0.45;
+    // Точка сброса ищется по рельефу: на горке масло и мины не парят
+    // в воздухе и не уходят под полотно.
+    const behind = body.position.clone().vadd(forward.scale(-2.4));
+    const ground = this.groundPlacement(behind.x, behind.z, body.position.y + 1.5);
+    const position = ground ? new Vec3(behind.x, ground.y, behind.z) : behind;
 
     if (kind === 'oilSlick') {
       // При переполнении не удаляем старое пятно мгновенно, а запускаем его
@@ -1061,7 +1143,9 @@ export class Game {
       if (activeCount >= LIMITS.slicks && oldest) oldest.age = oldest.lifetime;
 
       const id = this.world.createEntity();
-      this.world.add(id, new Transform(position.clone()));
+      const normal = ground?.quaternion ?? new Quaternion();
+      const slickCenter = new Vec3(position.x, position.y + 0.06, position.z);
+      this.world.add(id, new Transform(slickCenter.clone(), normal.clone()));
       this.world.add(
         id,
         new Slick(spec.radius, ownerId, WEAPON_TUNING.slickLifetimeSec, WEAPON_TUNING.slickFadeSec),
@@ -1071,7 +1155,8 @@ export class Game {
         unique: true,
         transparent: true,
       });
-      visual.position.set(position.x, 0.06, position.z);
+      visual.position.set(slickCenter.x, slickCenter.y, slickCenter.z);
+      visual.quaternion.set(normal.x, normal.y, normal.z, normal.w);
       this.renderer.add(visual);
       this.world.add(id, new Render('slick', visual));
       this.registerVisual(id, visual);
@@ -1100,11 +1185,15 @@ export class Game {
       if (oldest !== undefined) this.world.destroyEntity(oldest);
     }
     const id = this.world.createEntity();
-    this.world.add(id, new Transform(position.clone()));
+    const ground = this.groundPlacement(position.x, position.z, position.y + 1.5);
+    const spawn = ground ? new Vec3(position.x, ground.y + 0.16, position.z) : position.clone();
+    const rotation = ground?.quaternion ?? new Quaternion();
+    this.world.add(id, new Transform(spawn.clone(), rotation.clone()));
     const mine = new Mine(kind, damage, radius, kind === 'cassette' ? WEAPON_TUNING.cassetteLifetime : lifetime, ownerId, kind === 'spikeMine' ? WEAPON_TUNING.mineArmDelay : 0);
     this.world.add(id, mine);
     const visual = this.renderer.cylinder(0.45, 0.28, kind === 'cassette' ? 0xffb347 : 0xd0d0d0, 10, { emissive: 0.15 });
-    visual.position.set(position.x, position.y, position.z);
+    visual.position.set(spawn.x, spawn.y, spawn.z);
+    visual.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
     this.renderer.add(visual);
     this.world.add(id, new Render('mine', visual));
     this.registerVisual(id, visual);
